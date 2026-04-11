@@ -1,18 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useState } from 'react'
 
 export function useRoom() {
-  const [roomId, setRoomId] = useState<string | null>(null);
-  const [inputRoomId, setInputRoomId] = useState('');
-
-  // Parse room ID from URL on mount
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomFromUrl = params.get('roomid');
-    if (roomFromUrl) {
-      setRoomId(roomFromUrl);
-      setInputRoomId(roomFromUrl);
-    }
-  }, []);
+  const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('roomid'))
+  const [inputRoomId, setInputRoomId] = useState(
+    () => new URLSearchParams(window.location.search).get('roomid') ?? ''
+  )
 
   const joinRoom = useCallback((id: string) => {
     const trimmedId = id.trim();

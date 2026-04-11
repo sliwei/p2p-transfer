@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client';
 
 /** 本机开发：信令与 rtc-config 统一走 127.0.0.1:3001（IPv4），避免 localhost 解析到 ::1 与 WebRTC 的 127.0.0.1 host 候选混用；并与仅用「局域网 IP 打开页面」时的行为区分。 */
@@ -258,170 +258,208 @@ export function useWebRTC(roomId: string | null) {
     transfersRef.current = transfers;
   }, [transfers]);
 
-  // Load RTC config (PairDrop-style) then connect signaling — ensures PC uses server iceServers + sdpSemantics
   useEffect(() => {
-    if (!roomId || connectingRef.current || socketRef.current?.connected) return;
-
-    let cancelled = false;
-    connectingRef.current = true;
-
-    const setupSocket = () => {
-      skipSocketDisconnectStateRef.current = false;
-      signalingChainRef.current = Promise.resolve();
-
-      const enqueueSignaling = (fn: () => Promise<void>) => {
-        signalingChainRef.current = signalingChainRef.current
-          .then(() => fn())
-          .catch((e) => console.error('[WebRTC] signaling step failed:', e));
+    refreshIcePathRef.current = (peerId: string) => {
+      const run = async () => {
+        const p = peersRef.current.get(peerId);
+        if (!p?.connection || p.connection.connectionState === 'closed') return;
+        const { path, detail } = await detectIceTransportPath(p.connection);
+        const cur = peersRef.current.get(peerId);
+        if (!cur || cur.connection !== p.connection) return;
+        cur.iceTransportPath = path;
+        cur.iceTransportDetail = detail;
+        const pathCn =
+          path === 'relay' ? 'TURN 中继' : path === 'direct' ? '直联(非 relay)' : '未知';
+        console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail);
+        setPeers(new Map(peersRef.current));
       };
-
-      const newSocket = io(SIGNALING_SERVER, {
-        // 每次握手（含自动重连）重新读 sessionStorage，避免首连 `{}` 后无法带上新下发的 hash
-        auth: (cb) => {
-          cb(loadStoredPeerAuth() ?? {});
-        },
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000
-      });
-      socketRef.current = newSocket;
-
-      newSocket.on('rtc-config', (cfg: unknown) => {
-        rtcConfigRef.current = normalizeRtcConfig(cfg);
-        console.log('[WebRTC] rtc-config updated from signaling');
-      });
-
-      newSocket.on('connect', () => {
-        console.log('[Socket] Connected: socket.id=', newSocket.id, 'emit join-room');
-        newSocket.emit('join-room', roomId);
-      });
-
-      newSocket.on(
-        'joined-room',
-        ({
-          roomId: joinedRoomId,
-          peerId,
-          peerIdHash,
-          peers: existingPeers,
-        }: {
-          roomId: string;
-          peerId: string;
-          peerIdHash: string;
-          peers: string[];
-        }) => {
-        console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId);
-        setSignalingInRoom(true);
-        myStablePeerIdRef.current = peerId;
-        setMyPeerId(peerId);
-        if (peerIdHash) {
-          savePeerAuth(peerId, peerIdHash);
-        }
-
-        if (existingPeers && existingPeers.length > 0) {
-          console.log('[Socket] Connecting to existing peers:', existingPeers);
-          existingPeers.forEach((otherPeerId: string) => {
-            if (otherPeerId !== peerId) {
-              const shouldInitiate = peerId < otherPeerId;
-              console.log(`[Socket] Peer ${otherPeerId}: shouldInitiate=${shouldInitiate} (myId=${peerId})`);
-              if (shouldInitiate) {
-                createPeerConnection(otherPeerId, true);
-              }
-            }
-          });
-        }
-        }
-      );
-
-      newSocket.on('peer-joined', (joinedPeerId: string) => {
-        console.log('[Socket] Peer joined:', joinedPeerId);
-        const myId = myStablePeerIdRef.current;
-        if (joinedPeerId === myId) {
-          console.log('[Socket] Ignoring self join');
-          return;
-        }
-        const shouldInitiate = myId < joinedPeerId;
-        console.log(`[Socket] Peer ${joinedPeerId} joined: shouldInitiate=${shouldInitiate} (myStableId=${myId})`);
-        if (shouldInitiate) {
-          createPeerConnection(joinedPeerId, true);
-        }
-      });
-
-      newSocket.on('peer-left', (peerId: string) => {
-        console.log('[Socket] Peer left:', peerId);
-        removePeer(peerId);
-      });
-
-      newSocket.on('offer', ({ senderId, offer }) => {
-        console.log('[Socket] Received offer from:', senderId);
-        enqueueSignaling(() => handleOffer(senderId, offer));
-      });
-
-      newSocket.on('answer', ({ senderId, answer }) => {
-        console.log('[Socket] Received answer from:', senderId);
-        enqueueSignaling(() => handleAnswer(senderId, answer));
-      });
-
-      newSocket.on('ice-candidate', ({ senderId, candidate }) => {
-        enqueueSignaling(() => handleIceCandidate(senderId, candidate));
-      });
-
-      newSocket.on('disconnect', () => {
-        if (skipSocketDisconnectStateRef.current) {
-          console.log('[Socket] Disconnected (intentional cleanup)');
-          return;
-        }
-        console.log('[Socket] Disconnected');
-        setSignalingInRoom(false);
-        peersRef.current.forEach((p) => p.connection.close());
-        peersRef.current.clear();
-        pendingIceCandidatesRef.current.clear();
-        setPeers(new Map());
-      });
-    };
-
-    void (async () => {
-      try {
-        rtcConfigRef.current = await fetchRtcConfig();
-        console.log('[WebRTC] rtc-config loaded via HTTP');
-      } catch (e) {
-        console.warn('[WebRTC] rtc-config fetch failed, using default:', e);
-        rtcConfigRef.current = DEFAULT_RTC_CONFIG;
-      }
-      if (cancelled) {
-        connectingRef.current = false;
-        return;
-      }
-      setupSocket();
-    })();
-
-    return () => {
-      cancelled = true;
-      connectingRef.current = false;
-      signalingChainRef.current = Promise.resolve();
-      console.log('[Socket] Cleanup - disconnecting');
-      skipSocketDisconnectStateRef.current = true;
-      socketRef.current?.close();
-      socketRef.current = null;
-    };
-  }, [roomId]);
-
-  // Separate cleanup effect for component unmount
-  useEffect(() => {
-    return () => {
-      console.log('[WebRTC] Component unmounting, cleaning up');
-      connectingRef.current = false;
-      // 后声明的 effect 先清理：若此处只把 ref 置空而不 close，roomId effect 的 cleanup 将无法关闭信令连接
-      skipSocketDisconnectStateRef.current = true;
-      socketRef.current?.close();
-      socketRef.current = null;
-      peersRef.current.forEach((peer) => {
-        peer.connection.close();
-      });
-      peersRef.current.clear();
-      pendingIceCandidatesRef.current.clear();
+      void run();
+      window.setTimeout(() => void run(), 400);
+      window.setTimeout(() => void run(), 1500);
     };
   }, []);
+
+  const handleDataChannelMessage = useCallback((peerId: string, data: string | ArrayBuffer) => {
+    if (typeof data === 'string') {
+      // Metadata or control message
+      try {
+        const message = JSON.parse(data);
+        if (message.type === 'file-start') {
+          // Initialize file reception
+          const fileId = message.fileId;
+          fileMetadataRef.current.set(fileId, {
+            name: message.fileName,
+            size: message.fileSize,
+            type: message.fileType,
+            totalChunks: message.totalChunks,
+            fromPeerId: peerId
+          });
+          receivedChunksRef.current.set(fileId, new Map());
+          
+          setTransfers(prev => {
+            const updated = new Map(prev);
+            updated.set(fileId, {
+              fileId,
+              fileName: message.fileName,
+              fileSize: message.fileSize,
+              sentBytes: 0,
+              speed: 0,
+              status: 'transferring',
+              direction: 'receiving'
+            });
+            return updated;
+          });
+        } else if (message.type === 'file-complete') {
+          // Reassemble file
+          const fileId = message.fileId;
+          const metadata = fileMetadataRef.current.get(fileId);
+          const chunks = receivedChunksRef.current.get(fileId);
+          
+          if (metadata && chunks) {
+            const orderedChunks: ArrayBuffer[] = [];
+            for (let i = 0; i < metadata.totalChunks; i++) {
+              const chunk = chunks.get(i);
+              if (chunk) {
+                orderedChunks.push(chunk);
+              }
+            }
+            if (orderedChunks.length !== metadata.totalChunks) {
+              console.error(
+                '[DataChannel] 分片缺失，丢弃损坏文件:',
+                fileId,
+                `收到 ${orderedChunks.length}/${metadata.totalChunks}`
+              );
+              fileMetadataRef.current.delete(fileId);
+              receivedChunksRef.current.delete(fileId);
+              setTransfers((prev) => {
+                const updated = new Map(prev);
+                const t = updated.get(fileId);
+                if (t) {
+                  t.status = 'error';
+                  updated.set(fileId, t);
+                }
+                return updated;
+              });
+              return;
+            }
+
+            const blob = new Blob(orderedChunks, { type: metadata.type });
+            const receivedFile: ReceivedFile = {
+              id: fileId,
+              name: metadata.name,
+              size: metadata.size,
+              type: metadata.type,
+              blob,
+              fromPeerId: metadata.fromPeerId,
+              timestamp: Date.now()
+            };
+            
+            setReceivedFiles(prev => [...prev, receivedFile]);
+            
+            setTransfers(prev => {
+              const updated = new Map(prev);
+              const transfer = updated.get(fileId);
+              if (transfer) {
+                transfer.status = 'completed';
+                transfer.sentBytes = metadata.size;
+                updated.set(fileId, transfer);
+              }
+              return updated;
+            });
+            
+            // Cleanup
+            fileMetadataRef.current.delete(fileId);
+            receivedChunksRef.current.delete(fileId);
+          }
+        }
+      } catch (e) {
+        console.error('[DataChannel] Error parsing message:', e);
+      }
+    } else {
+      // Binary data (file chunk)
+      const view = new DataView(data);
+      const fileIdLength = view.getUint32(0);
+      const fileId = new TextDecoder().decode(new Uint8Array(data, 4, fileIdLength));
+      const chunkIndex = view.getUint32(4 + fileIdLength);
+      const chunkData = new Uint8Array(data, 8 + fileIdLength);
+      
+      const chunks = receivedChunksRef.current.get(fileId);
+      if (chunks) {
+        chunks.set(chunkIndex, chunkData.buffer.slice(chunkData.byteOffset, chunkData.byteOffset + chunkData.byteLength));
+        
+        const metadata = fileMetadataRef.current.get(fileId);
+        if (metadata) {
+          let receivedBytes = 0;
+          chunks.forEach((buf) => {
+            receivedBytes += buf.byteLength;
+          });
+          setTransfers(prev => {
+            const updated = new Map(prev);
+            const transfer = updated.get(fileId);
+            if (transfer) {
+              transfer.sentBytes = Math.min(receivedBytes, metadata.size);
+            }
+            return updated;
+          });
+        }
+      }
+    }
+  }, []);
+  const removePeer = useCallback((peerId: string) => {
+    console.log('[WebRTC] Removing peer:', peerId);
+    const peer = peersRef.current.get(peerId);
+    if (peer) {
+      peer.connection.close();
+      peersRef.current.delete(peerId);
+    }
+    pendingIceCandidatesRef.current.delete(peerId);
+    setPeers(prev => {
+      const updated = new Map(prev);
+      updated.delete(peerId);
+      return updated;
+    });
+  }, []);
+  const setupDataChannel = useCallback((peerId: string, dataChannel: RTCDataChannel) => {
+    dataChannel.bufferedAmountLowThreshold = DC_SEND_BUFFER_HIGH_WATER;
+    dataChannel.onopen = () => {
+      console.log('[DataChannel] Opened with:', peerId);
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.dataChannel = dataChannel;
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
+      }
+      setPeers(new Map(peersRef.current));
+      refreshIcePathRef.current(peerId);
+    };
+
+    dataChannel.onclose = () => {
+      console.log('[DataChannel] Closed with:', peerId);
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        setPeers(new Map(peersRef.current));
+      }
+    };
+
+    dataChannel.onerror = (error) => {
+      console.error('[DataChannel] Error:', error);
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        setPeers(new Map(peersRef.current));
+      }
+    };
+
+    dataChannel.onmessage = (event) => {
+      handleDataChannelMessage(peerId, event.data);
+    };
+  }, [handleDataChannelMessage]);
 
   const createPeerConnection = useCallback((peerId: string, isInitiator: boolean): RTCPeerConnection => {
     // Check if connection already exists
@@ -602,7 +640,7 @@ export function useWebRTC(roomId: string | null) {
     }
 
     return pc;
-  }, []);
+  }, [removePeer, setupDataChannel]);
 
   const handleOffer = useCallback(async (senderId: string, offer: RTCSessionDescriptionInit) => {
     console.log('[WebRTC] Handling offer from:', senderId);
@@ -721,189 +759,172 @@ export function useWebRTC(roomId: string | null) {
       peer.iceCandidates.push(candidate);
     }
   }, []);
+  // Load RTC config (PairDrop-style) then connect signaling — ensures PC uses server iceServers + sdpSemantics
+  useEffect(() => {
+    if (!roomId || connectingRef.current || socketRef.current?.connected) return;
 
-  const removePeer = useCallback((peerId: string) => {
-    console.log('[WebRTC] Removing peer:', peerId);
-    const peer = peersRef.current.get(peerId);
-    if (peer) {
-      peer.connection.close();
-      peersRef.current.delete(peerId);
-    }
-    pendingIceCandidatesRef.current.delete(peerId);
-    setPeers(prev => {
-      const updated = new Map(prev);
-      updated.delete(peerId);
-      return updated;
-    });
-  }, []);
+    let cancelled = false;
+    connectingRef.current = true;
 
-  const setupDataChannel = useCallback((peerId: string, dataChannel: RTCDataChannel) => {
-    dataChannel.bufferedAmountLowThreshold = DC_SEND_BUFFER_HIGH_WATER;
-    dataChannel.onopen = () => {
-      console.log('[DataChannel] Opened with:', peerId);
-      const peerInRef = peersRef.current.get(peerId);
-      if (peerInRef) {
-        peerInRef.dataChannel = dataChannel;
-        peerInRef.status = recomputePeerTransferStatus(peerInRef);
-        peerInRef.iceTransportPath = undefined;
-        peerInRef.iceTransportDetail = undefined;
-      }
-      setPeers(new Map(peersRef.current));
-      refreshIcePathRef.current(peerId);
+    const setupSocket = () => {
+      skipSocketDisconnectStateRef.current = false;
+      signalingChainRef.current = Promise.resolve();
+
+      const enqueueSignaling = (fn: () => Promise<void>) => {
+        signalingChainRef.current = signalingChainRef.current
+          .then(() => fn())
+          .catch((e) => console.error('[WebRTC] signaling step failed:', e));
+      };
+
+      const newSocket = io(SIGNALING_SERVER, {
+        // 每次握手（含自动重连）重新读 sessionStorage，避免首连 `{}` 后无法带上新下发的 hash
+        auth: (cb) => {
+          cb(loadStoredPeerAuth() ?? {});
+        },
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+      });
+      socketRef.current = newSocket;
+
+      newSocket.on('rtc-config', (cfg: unknown) => {
+        rtcConfigRef.current = normalizeRtcConfig(cfg);
+        console.log('[WebRTC] rtc-config updated from signaling');
+      });
+
+      newSocket.on('connect', () => {
+        console.log('[Socket] Connected: socket.id=', newSocket.id, 'emit join-room');
+        newSocket.emit('join-room', roomId);
+      });
+
+      newSocket.on(
+        'joined-room',
+        ({
+          roomId: joinedRoomId,
+          peerId,
+          peerIdHash,
+          peers: existingPeers,
+        }: {
+          roomId: string;
+          peerId: string;
+          peerIdHash: string;
+          peers: string[];
+        }) => {
+        console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId);
+        setSignalingInRoom(true);
+        myStablePeerIdRef.current = peerId;
+        setMyPeerId(peerId);
+        if (peerIdHash) {
+          savePeerAuth(peerId, peerIdHash);
+        }
+
+        if (existingPeers && existingPeers.length > 0) {
+          console.log('[Socket] Connecting to existing peers:', existingPeers);
+          existingPeers.forEach((otherPeerId: string) => {
+            if (otherPeerId !== peerId) {
+              const shouldInitiate = peerId < otherPeerId;
+              console.log(`[Socket] Peer ${otherPeerId}: shouldInitiate=${shouldInitiate} (myId=${peerId})`);
+              if (shouldInitiate) {
+                createPeerConnection(otherPeerId, true);
+              }
+            }
+          });
+        }
+        }
+      );
+
+      newSocket.on('peer-joined', (joinedPeerId: string) => {
+        console.log('[Socket] Peer joined:', joinedPeerId);
+        const myId = myStablePeerIdRef.current;
+        if (joinedPeerId === myId) {
+          console.log('[Socket] Ignoring self join');
+          return;
+        }
+        const shouldInitiate = myId < joinedPeerId;
+        console.log(`[Socket] Peer ${joinedPeerId} joined: shouldInitiate=${shouldInitiate} (myStableId=${myId})`);
+        if (shouldInitiate) {
+          createPeerConnection(joinedPeerId, true);
+        }
+      });
+
+      newSocket.on('peer-left', (peerId: string) => {
+        console.log('[Socket] Peer left:', peerId);
+        removePeer(peerId);
+      });
+
+      newSocket.on('offer', ({ senderId, offer }) => {
+        console.log('[Socket] Received offer from:', senderId);
+        enqueueSignaling(() => handleOffer(senderId, offer));
+      });
+
+      newSocket.on('answer', ({ senderId, answer }) => {
+        console.log('[Socket] Received answer from:', senderId);
+        enqueueSignaling(() => handleAnswer(senderId, answer));
+      });
+
+      newSocket.on('ice-candidate', ({ senderId, candidate }) => {
+        enqueueSignaling(() => handleIceCandidate(senderId, candidate));
+      });
+
+      newSocket.on('disconnect', () => {
+        if (skipSocketDisconnectStateRef.current) {
+          console.log('[Socket] Disconnected (intentional cleanup)');
+          return;
+        }
+        console.log('[Socket] Disconnected');
+        setSignalingInRoom(false);
+        peersRef.current.forEach((p) => p.connection.close());
+        peersRef.current.clear();
+        pendingIceCandidatesRef.current.clear();
+        setPeers(new Map());
+      });
     };
 
-    dataChannel.onclose = () => {
-      console.log('[DataChannel] Closed with:', peerId);
-      const peerInRef = peersRef.current.get(peerId);
-      if (peerInRef) {
-        peerInRef.iceTransportPath = undefined;
-        peerInRef.iceTransportDetail = undefined;
-        peerInRef.status = recomputePeerTransferStatus(peerInRef);
-        setPeers(new Map(peersRef.current));
-      }
-    };
-
-    dataChannel.onerror = (error) => {
-      console.error('[DataChannel] Error:', error);
-      const peerInRef = peersRef.current.get(peerId);
-      if (peerInRef) {
-        peerInRef.iceTransportPath = undefined;
-        peerInRef.iceTransportDetail = undefined;
-        peerInRef.status = recomputePeerTransferStatus(peerInRef);
-        setPeers(new Map(peersRef.current));
-      }
-    };
-
-    dataChannel.onmessage = (event) => {
-      handleDataChannelMessage(peerId, event.data);
-    };
-  }, []);
-
-  const handleDataChannelMessage = useCallback((peerId: string, data: any) => {
-    if (typeof data === 'string') {
-      // Metadata or control message
+    void (async () => {
       try {
-        const message = JSON.parse(data);
-        if (message.type === 'file-start') {
-          // Initialize file reception
-          const fileId = message.fileId;
-          fileMetadataRef.current.set(fileId, {
-            name: message.fileName,
-            size: message.fileSize,
-            type: message.fileType,
-            totalChunks: message.totalChunks,
-            fromPeerId: peerId
-          });
-          receivedChunksRef.current.set(fileId, new Map());
-          
-          setTransfers(prev => {
-            const updated = new Map(prev);
-            updated.set(fileId, {
-              fileId,
-              fileName: message.fileName,
-              fileSize: message.fileSize,
-              sentBytes: 0,
-              speed: 0,
-              status: 'transferring',
-              direction: 'receiving'
-            });
-            return updated;
-          });
-        } else if (message.type === 'file-complete') {
-          // Reassemble file
-          const fileId = message.fileId;
-          const metadata = fileMetadataRef.current.get(fileId);
-          const chunks = receivedChunksRef.current.get(fileId);
-          
-          if (metadata && chunks) {
-            const orderedChunks: ArrayBuffer[] = [];
-            for (let i = 0; i < metadata.totalChunks; i++) {
-              const chunk = chunks.get(i);
-              if (chunk) {
-                orderedChunks.push(chunk);
-              }
-            }
-            if (orderedChunks.length !== metadata.totalChunks) {
-              console.error(
-                '[DataChannel] 分片缺失，丢弃损坏文件:',
-                fileId,
-                `收到 ${orderedChunks.length}/${metadata.totalChunks}`
-              );
-              fileMetadataRef.current.delete(fileId);
-              receivedChunksRef.current.delete(fileId);
-              setTransfers((prev) => {
-                const updated = new Map(prev);
-                const t = updated.get(fileId);
-                if (t) {
-                  t.status = 'error';
-                  updated.set(fileId, t);
-                }
-                return updated;
-              });
-              return;
-            }
-
-            const blob = new Blob(orderedChunks, { type: metadata.type });
-            const receivedFile: ReceivedFile = {
-              id: fileId,
-              name: metadata.name,
-              size: metadata.size,
-              type: metadata.type,
-              blob,
-              fromPeerId: metadata.fromPeerId,
-              timestamp: Date.now()
-            };
-            
-            setReceivedFiles(prev => [...prev, receivedFile]);
-            
-            setTransfers(prev => {
-              const updated = new Map(prev);
-              const transfer = updated.get(fileId);
-              if (transfer) {
-                transfer.status = 'completed';
-                transfer.sentBytes = metadata.size;
-                updated.set(fileId, transfer);
-              }
-              return updated;
-            });
-            
-            // Cleanup
-            fileMetadataRef.current.delete(fileId);
-            receivedChunksRef.current.delete(fileId);
-          }
-        }
+        rtcConfigRef.current = await fetchRtcConfig();
+        console.log('[WebRTC] rtc-config loaded via HTTP');
       } catch (e) {
-        console.error('[DataChannel] Error parsing message:', e);
+        console.warn('[WebRTC] rtc-config fetch failed, using default:', e);
+        rtcConfigRef.current = DEFAULT_RTC_CONFIG;
       }
-    } else {
-      // Binary data (file chunk)
-      const view = new DataView(data);
-      const fileIdLength = view.getUint32(0);
-      const fileId = new TextDecoder().decode(new Uint8Array(data, 4, fileIdLength));
-      const chunkIndex = view.getUint32(4 + fileIdLength);
-      const chunkData = new Uint8Array(data, 8 + fileIdLength);
-      
-      const chunks = receivedChunksRef.current.get(fileId);
-      if (chunks) {
-        chunks.set(chunkIndex, chunkData.buffer.slice(chunkData.byteOffset, chunkData.byteOffset + chunkData.byteLength));
-        
-        const metadata = fileMetadataRef.current.get(fileId);
-        if (metadata) {
-          let receivedBytes = 0;
-          chunks.forEach((buf) => {
-            receivedBytes += buf.byteLength;
-          });
-          setTransfers(prev => {
-            const updated = new Map(prev);
-            const transfer = updated.get(fileId);
-            if (transfer) {
-              transfer.sentBytes = Math.min(receivedBytes, metadata.size);
-            }
-            return updated;
-          });
-        }
+      if (cancelled) {
+        connectingRef.current = false;
+        return;
       }
-    }
+      setupSocket();
+    })();
+
+    return () => {
+      cancelled = true;
+      connectingRef.current = false;
+      signalingChainRef.current = Promise.resolve();
+      console.log('[Socket] Cleanup - disconnecting');
+      skipSocketDisconnectStateRef.current = true;
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
+  }, [roomId, createPeerConnection, handleOffer, handleAnswer, handleIceCandidate, removePeer]);
+
+  // Separate cleanup effect for component unmount
+  useEffect(() => {
+    return () => {
+      console.log('[WebRTC] Component unmounting, cleaning up');
+      connectingRef.current = false;
+      // 后声明的 effect 先清理：若此处只把 ref 置空而不 close，roomId effect 的 cleanup 将无法关闭信令连接
+      skipSocketDisconnectStateRef.current = true;
+      socketRef.current?.close();
+      socketRef.current = null;
+      const peerMap = peersRef.current;
+      const pendingMap = pendingIceCandidatesRef.current;
+      const peersSnapshot = new Map(peerMap);
+      peersSnapshot.forEach((peer) => {
+        peer.connection.close();
+      });
+      peerMap.clear();
+      pendingMap.clear();
+    };
   }, []);
 
   const sendFile = useCallback(async (file: File, targetPeerId?: string) => {
@@ -1032,25 +1053,6 @@ export function useWebRTC(roomId: string | null) {
   const p2pFileTransferReady = Array.from(peers.values()).some(
     (p) => p.dataChannel?.readyState === 'open'
   );
-
-  refreshIcePathRef.current = (peerId: string) => {
-    const run = async () => {
-      const p = peersRef.current.get(peerId);
-      if (!p?.connection || p.connection.connectionState === 'closed') return;
-      const { path, detail } = await detectIceTransportPath(p.connection);
-      const cur = peersRef.current.get(peerId);
-      if (!cur || cur.connection !== p.connection) return;
-      cur.iceTransportPath = path;
-      cur.iceTransportDetail = detail;
-      const pathCn =
-        path === 'relay' ? 'TURN 中继' : path === 'direct' ? '直联(非 relay)' : '未知';
-      console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail);
-      setPeers(new Map(peersRef.current));
-    };
-    void run();
-    window.setTimeout(() => void run(), 400);
-    window.setTimeout(() => void run(), 1500);
-  };
 
   return {
     myPeerId,

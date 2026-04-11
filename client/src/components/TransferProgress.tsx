@@ -1,95 +1,108 @@
-
-import { TransferProgress } from '../hooks/useWebRTC';
+import { TransferProgress } from '../hooks/useWebRTC'
 
 interface TransferProgressListProps {
-  transfers: TransferProgress[];
+  transfers: TransferProgress[]
+}
+
+const itemBorderClass = (status: TransferProgress['status']) => {
+  switch (status) {
+    case 'completed':
+      return 'border-accent bg-accent-soft'
+    case 'error':
+      return 'border-accent-danger'
+    default:
+      return 'border-line bg-surface-raised'
+  }
 }
 
 export const TransferProgressList: React.FC<TransferProgressListProps> = ({ transfers }) => {
   const formatFileSize = (bytes: number): string => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  }
 
   const formatSpeed = (bytesPerSecond: number): string => {
-    if (bytesPerSecond === 0) return '0 KB/s';
-    const k = 1024;
-    const sizes = ['B/s', 'KB/s', 'MB/s'];
-    const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
-    return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
+    if (bytesPerSecond === 0) return '0 KB/s'
+    const k = 1024
+    const sizes = ['B/s', 'KB/s', 'MB/s']
+    const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k))
+    return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+  }
 
   const getStatusIcon = (status: TransferProgress['status']) => {
     switch (status) {
-      case 'pending': return '⏳';
-      case 'transferring': return '⬆️';
-      case 'completed': return '✅';
-      case 'error': return '❌';
-      default: return '📄';
+      case 'pending':
+        return '⏳'
+      case 'transferring':
+        return '⬆️'
+      case 'completed':
+        return '✅'
+      case 'error':
+        return '❌'
+      default:
+        return '📄'
     }
-  };
+  }
 
   const getDirectionIcon = (direction: TransferProgress['direction']) => {
-    return direction === 'sending' ? '⬆️' : '⬇️';
-  };
+    return direction === 'sending' ? '⬆️' : '⬇️'
+  }
 
   if (transfers.length === 0) {
     return (
-      <div className="transfer-section">
-        <h3 className="transfer-title">Transfer Progress</h3>
-        <div className="transfer-empty">
-          <span>No active transfers</span>
-        </div>
+      <div className="mt-6 border-t border-line pt-6">
+        <h3 className="mb-4 text-base font-semibold text-content">Transfer Progress</h3>
+        <div className="rounded-[10px] bg-surface-raised py-8 text-center text-sm text-content-muted">No active transfers</div>
       </div>
-    );
+    )
   }
 
   return (
-    <div className="transfer-section">
-      <h3 className="transfer-title">Transfer Progress</h3>
-      <div className="transfer-list">
+    <div className="mt-6 border-t border-line pt-6">
+      <h3 className="mb-4 text-base font-semibold text-content">Transfer Progress</h3>
+      <div className="flex flex-col gap-3">
         {transfers.map((transfer) => {
-          const progress = Math.min(100, (transfer.sentBytes / transfer.fileSize) * 100);
-          
+          const progress = Math.min(100, (transfer.sentBytes / transfer.fileSize) * 100)
+
           return (
-            <div key={transfer.fileId} className={`transfer-item ${transfer.status}`}>
-              <div className="transfer-header">
-                <div className="transfer-file-info">
-                  <span className="transfer-icon">{getDirectionIcon(transfer.direction)}</span>
-                  <span className="transfer-file-name" title={transfer.fileName}>
+            <div key={transfer.fileId} className={`rounded-[10px] border p-4 ${itemBorderClass(transfer.status)}`}>
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="text-base">{getDirectionIcon(transfer.direction)}</span>
+                  <span className="truncate text-[0.9375rem] font-medium text-content" title={transfer.fileName}>
                     {transfer.fileName}
                   </span>
                 </div>
-                <div className="transfer-status">
-                  <span className="status-badge">{getStatusIcon(transfer.status)}</span>
+                <div className="shrink-0">
+                  <span className="text-base">{getStatusIcon(transfer.status)}</span>
                 </div>
               </div>
-              
-              <div className="transfer-progress-container">
-                <div className="transfer-progress-bar">
-                  <div 
-                    className="transfer-progress-fill"
+
+              <div className="mb-2 flex items-center gap-3">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-sm bg-surface-overlay">
+                  <div
+                    className="h-full rounded-sm bg-gradient-to-r from-accent to-accent-blue transition-[width] duration-300 ease-out"
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <span className="transfer-percentage">{progress.toFixed(0)}%</span>
+                <span className="min-w-[2.25rem] text-right font-mono text-xs font-semibold text-accent">{progress.toFixed(0)}%</span>
               </div>
-              
-              <div className="transfer-stats">
-                <span className="transfer-size">
+
+              <div className="flex items-center justify-between font-mono text-xs text-content-secondary">
+                <span>
                   {formatFileSize(transfer.sentBytes)} / {formatFileSize(transfer.fileSize)}
                 </span>
-                {transfer.status === 'transferring' && transfer.speed > 0 && (
-                  <span className="transfer-speed">{formatSpeed(transfer.speed)}</span>
-                )}
+                {transfer.status === 'transferring' && transfer.speed > 0 ? (
+                  <span className="text-accent-blue">{formatSpeed(transfer.speed)}</span>
+                ) : null}
               </div>
             </div>
-          );
+          )
         })}
       </div>
     </div>
-  );
-};
+  )
+}
