@@ -1,0 +1,13 @@
+{
+  "name": "p2p-transfer",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm install && npm run dev",
+    "client": "cd client && npm install && npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
