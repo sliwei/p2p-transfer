@@ -269,12 +269,20 @@ export function useWebRTC(roomId: string | null) {
         const { path, detail } = await detectIceTransportPath(p.connection);
         const cur = peersRef.current.get(peerId);
         if (!cur || cur.connection !== p.connection) return;
-        cur.iceTransportPath = path;
-        cur.iceTransportDetail = detail;
         const pathCn =
           path === 'relay' ? 'TURN 中继' : path === 'direct' ? '直联(非 relay)' : '未知';
-        console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail);
-        setPeers(new Map(peersRef.current));
+        setPeers(prev => {
+          const newPeers = new Map(prev);
+          const currentPeer = newPeers.get(peerId);
+          if (currentPeer && currentPeer.connection === p.connection && 
+             (currentPeer.iceTransportPath !== path || currentPeer.iceTransportDetail !== detail)) {
+            currentPeer.iceTransportPath = path;
+            currentPeer.iceTransportDetail = detail;
+            console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail);
+            return newPeers;
+          }
+          return prev;
+        });
       };
       void run();
       window.setTimeout(() => void run(), 400);
@@ -308,6 +316,7 @@ export function useWebRTC(roomId: string | null) {
               sentBytes: 0,
               speed: 0,
               status: 'transferring',
+              targetPeerId: peerId,
               direction: 'receiving'
             });
             return updated;

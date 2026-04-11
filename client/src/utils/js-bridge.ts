@@ -211,6 +211,21 @@ class JsBridge {
     }
   }
 
+  /** 是否可能为嵌入宿主（含 iOS/Android 注入链） */
+  isNativeEmbedHost(): boolean {
+    return this.isIOSWebView() || !!this.window.WVJBCallbacks || !!this.window.WebViewJavascriptBridge
+  }
+
+  /** Bridge 已初始化且可 call/register */
+  isBridgeReady(): boolean {
+    return this.isReady && !!this.window.WebViewJavascriptBridge
+  }
+
+  /** Bridge 就绪后执行一次（嵌入页用） */
+  whenReady(callback: () => void): void {
+    this.waitForReady(callback)
+  }
+
   /**
    * 检查是否在iOS WebView环境中
    */
@@ -233,9 +248,9 @@ class JsBridge {
   callHandler(handlerName: string, data?: unknown, callback?: JSBridgeCallback): void {
     console.log(`[JsBridge] 调用处理器: ${handlerName}`, data)
 
-    if (!this.isIOSWebView()) {
-      console.warn('[JsBridge] 不在 iOS WebView 环境中')
-      callback?.({ error: 'Not in iOS WebView environment' })
+    if (!this.isNativeEmbedHost()) {
+      console.warn('[JsBridge] 非 WebView 宿主环境，跳过 callHandler:', handlerName)
+      callback?.({ error: 'Not in WebView environment' })
       return
     }
 
@@ -260,6 +275,10 @@ class JsBridge {
    * @param handler 处理函数
    */
   registerHandler(handlerName: string, handler: JSBridgeHandler): void {
+    if (!this.isNativeEmbedHost()) {
+      console.debug('[JsBridge] 非 WebView 宿主，跳过 registerHandler:', handlerName)
+      return
+    }
     this.waitForReady(() => {
       // 等待 bridge 就绪后，调用已被包装的 registerHandler
       if (this.window.WebViewJavascriptBridge) {
@@ -318,6 +337,28 @@ class JsBridge {
   // 发送信令同步 ------ sendMsgSync     字段 msg
   sendMsgSync(params: string, callback?: JSBridgeCallback): void {
     this.callHandler('sendMsgSync', params, callback)
+  }
+
+  // —— P2P 嵌入页 drop 协议（H5 → APP）——
+
+  /** 1. H5 加载完成，通知 APP 可交互 */
+  dropLoadComplete(extra?: Record<string, unknown>, callback?: JSBridgeCallback): void {
+    this.callHandler('dropLoadComplete', extra ?? {}, callback)
+  }
+
+  /** 2. 通知 APP：H5 侧已选/待传文件（无参；宿主自行处理后续动作） */
+  dropSelectFile(callback?: JSBridgeCallback): void {
+    this.callHandler('dropSelectFile', null, callback)
+  }
+
+  /** 3. 插入对话流（发送成功或收到文件等） */
+  dropFileFlow(payload: unknown, callback?: JSBridgeCallback): void {
+    this.callHandler('dropFileFlow', payload, callback)
+  }
+
+  /** 4. 请求 APP 保存到相册（通常传 base64 等） */
+  dropSaveFile(payload: unknown, callback?: JSBridgeCallback): void {
+    this.callHandler('dropSaveFile', payload, callback)
   }
 
   /**
