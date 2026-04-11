@@ -1,0 +1,73 @@
+# GitHub Secrets：KEY、DOCKER_USERNAME、DOCKER_PASSWORD、ENV（完整 .env 多行内容）
+# ENV 写入服务器 /data/docker/awei/p2p-transfer/.env（每次部署覆盖）
+# 修改主机：改下方 host / username / port
+
+name: build-and-deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+      REGISTRY: registry.cn-shenzhen.aliyuncs.com
+      IMAGE: registry.cn-shenzhen.aliyuncs.com/sliwei/p2p-transfer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Tag, login, build, push
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="live-$(date -u +'%Y%m%d%H%M%S')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login "$REGISTRY" \
+            -u "${{ secrets.DOCKER_USERNAME }}" \
+            --password-stdin
+          docker build -t "$IMAGE:$TAG" -f Dockerfile .
+          docker push "$IMAGE:$TAG"
+
+      - name: Stage .env & scp compose
+        env:
+          ENV_CONTENT: ${{ secrets.ENV }}
+          SSH_PRIVATE_KEY: ${{ secrets.KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ENV_CONTENT" > .env
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > /tmp/ci_deploy_key
+          ssh -i /tmp/ci_deploy_key -p 22 -o StrictHostKeyChecking=accept-new \
+            root@bstu.cn 'mkdir -p /data/docker/awei/p2p-transfer'
+          scp -i /tmp/ci_deploy_key -P 22 -o StrictHostKeyChecking=accept-new \
+            docker-compose.yml .env root@bstu.cn:/data/docker/awei/p2p-transfer/
+          shred -u /tmp/ci_deploy_key 2>/dev/null || rm -f /tmp/ci_deploy_key
+
+      - name: SSH — pull & up
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: bstu.cn
+          username: root
+          key: ${{ secrets.KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            mkdir -p /data/docker/awei/p2p-transfer
+            cd /data/docker/awei/p2p-transfer
+            chmod 600 .env 2>/dev/null || true
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login registry.cn-shenzhen.aliyuncs.com \
+              -u "${{ secrets.DOCKER_USERNAME }}" \
+              --password-stdin
+            export TAG=${{ steps.tag.outputs.tag }}
+            docker compose pull
+            docker compose up -d

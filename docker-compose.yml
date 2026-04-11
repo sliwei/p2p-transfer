@@ -1,10 +1,8 @@
 services:
   p2p-transfer:
-    build: .
+    restart: always
     container_name: p2p-transfer
-    restart: unless-stopped
-    ports:
-      - "3001:3001"
+    image: registry.cn-shenzhen.aliyuncs.com/sliwei/p2p-transfer:${TAG}
     environment:
       PORT: "3001"
       CLIENT_DIST: /app/static
@@ -13,3 +11,9 @@ services:
       # RTC_CONFIG: /app/server/rtc_config.json
     # volumes:
     #   - ./rtc_config.json:/app/server/rtc_config.json:ro
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
