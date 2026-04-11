@@ -3,7 +3,11 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import fs from 'fs';
+import path from 'path';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * 与 mb-pairdrop server/peer.js 同源思路：会话级 UUID + peerIdHash 校验，重连后 peerId 不变，便于后续断点续传。
@@ -189,8 +193,20 @@ io.on('connection', (socket) => {
   });
 });
 
+const clientDist = process.env.CLIENT_DIST;
+if (clientDist && fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/socket.io')) return next();
+    const indexHtml = path.join(clientDist, 'index.html');
+    if (!fs.existsSync(indexHtml)) return next();
+    res.sendFile(indexHtml);
+  });
+  console.log('[Server] Serving static from', clientDist);
+}
+
 const PORT = process.env.PORT || 3001;
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Signaling server running on port ${PORT}`);
 });

@@ -1,0 +1,6 @@
+**/node_modules
+.git
+**/.DS_Store
+client/dist
+**/rtc_config.json
+ssl

@@ -1,0 +1,15 @@
+services:
+  p2p-transfer:
+    build: .
+    container_name: p2p-transfer
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      CLIENT_DIST: /app/static
+      PEER_ID_SECRET: ${PEER_ID_SECRET:?在 .env 中设置 PEER_ID_SECRET}
+      # 可选：挂载 TURN 等配置 JSON，与 PairDrop 一致
+      # RTC_CONFIG: /app/server/rtc_config.json
+    # volumes:
+    #   - ./rtc_config.json:/app/server/rtc_config.json:ro
