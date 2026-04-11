@@ -36,7 +36,8 @@ export const PeerList: React.FC<PeerListProps> = ({
   };
 
   const formatPeerId = (id: string) => {
-    return id.slice(0, 8) + '...';
+    if (!id) return '—';
+    return id.length <= 8 ? id : `${id.slice(0, 8)}…`;
   };
 
   return (
@@ -75,9 +76,7 @@ export const PeerList: React.FC<PeerListProps> = ({
             <div className="peer-info">
               <div className="peer-avatar">P</div>
               <div className="peer-details">
-                <span className="peer-name">Peer</span>
-                <span className="peer-id">{formatPeerId(peer.id)}</span>
-                <span
+                <span className="peer-name">Peer  <span
                   className={`peer-ice-path ${
                     peer.iceTransportPath === 'relay'
                       ? 'relay'
@@ -94,7 +93,8 @@ export const PeerList: React.FC<PeerListProps> = ({
                       : peer.iceTransportPath === 'unknown'
                         ? '路径未知'
                         : '检测 ICE 路径…'}
-                </span>
+                </span></span>
+                <span className="peer-id">{formatPeerId(peer.id)}</span>
               </div>
             </div>
             <div className="peer-status">

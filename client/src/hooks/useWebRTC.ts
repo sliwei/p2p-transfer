@@ -39,7 +39,12 @@ function savePeerAuth(peerId: string, peerIdHash: string) {
 /** Fallback until /rtc-config loads (aligned with PairDrop server defaults). */
 const DEFAULT_RTC_CONFIG = {
   sdpSemantics: 'unified-plan',
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }],
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ],
 } as RTCConfiguration;
 
 function normalizeRtcConfig(raw: unknown): RTCConfiguration {
@@ -61,10 +66,11 @@ async function fetchRtcConfig(): Promise<RTCConfiguration> {
   return normalizeRtcConfig(await res.json());
 }
 
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+/** 较大分片减少 SCTP/JS 次数，利于高延迟链路吞吐（接收端按 chunkIndex 重组，与 ordered 无关） */
+const CHUNK_SIZE = 256 * 1024;
 
-/** 发送前保持 bufferedAmount 不超过此值，避免 RTCDataChannel send queue is full */
-const DC_SEND_BUFFER_HIGH_WATER = 512 * 1024;
+/** 允许更多数据在途，提高 BDP 利用率；过大占内存，4MB 为较均衡默认值 */
+const DC_SEND_BUFFER_HIGH_WATER = 4 * 1024 * 1024;
 
 async function waitUntilDataChannelCanSend(dc: RTCDataChannel, limit = DC_SEND_BUFFER_HIGH_WATER): Promise<void> {
   if (dc.readyState !== 'open') {
@@ -97,12 +103,19 @@ function candidateLooksLikeTunnelFakeIp(candidateStr: string): boolean {
   return /198\.(18|19)\.\d{1,3}\.\d{1,3}/.test(candidateStr);
 }
 
-/** 仅以 DataChannel open 为「可传文件」；避免 PC connectionState=connected 但打洞/链路实际不可用时的误报 */
+/**
+ * 可传文件：DC open 且 PC/ICE 处于稳定 connected，避免 ICE disconnected 时仍显示已连接、吞吐极低。
+ */
 function recomputePeerTransferStatus(p: Peer): Peer['status'] {
-  if (p.dataChannel?.readyState === 'open') return 'connected';
   const cs = p.connection.connectionState;
   const ice = p.connection.iceConnectionState;
-  if (cs === 'failed' || cs === 'closed' || ice === 'failed') return 'disconnected';
+  if (cs === 'failed' || cs === 'closed' || ice === 'failed' || ice === 'closed') {
+    return 'disconnected';
+  }
+  if (p.dataChannel?.readyState !== 'open') return 'connecting';
+  if (cs !== 'connected') return 'connecting';
+  if (ice === 'disconnected') return 'connecting';
+  if (ice === 'connected' || ice === 'completed') return 'connected';
   return 'connecting';
 }
 
@@ -222,6 +235,8 @@ export function useWebRTC(roomId: string | null) {
   /** 信令（Socket）已加入房间；与 WebRTC 是否可传文件无关 */
   const [signalingInRoom, setSignalingInRoom] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  /** 主动 close 时跳过 disconnect 里的 setState，避免卸载清理顺序导致泄漏或更新已卸载树 */
+  const skipSocketDisconnectStateRef = useRef(false);
   /** 信令层稳定 id（与 socket.id 解耦），用于比较 peer-joined / 协商发起方 */
   const myStablePeerIdRef = useRef<string>('');
   const connectingRef = useRef(false);
@@ -251,6 +266,7 @@ export function useWebRTC(roomId: string | null) {
     connectingRef.current = true;
 
     const setupSocket = () => {
+      skipSocketDisconnectStateRef.current = false;
       signalingChainRef.current = Promise.resolve();
 
       const enqueueSignaling = (fn: () => Promise<void>) => {
@@ -351,6 +367,10 @@ export function useWebRTC(roomId: string | null) {
       });
 
       newSocket.on('disconnect', () => {
+        if (skipSocketDisconnectStateRef.current) {
+          console.log('[Socket] Disconnected (intentional cleanup)');
+          return;
+        }
         console.log('[Socket] Disconnected');
         setSignalingInRoom(false);
         peersRef.current.forEach((p) => p.connection.close());
@@ -380,6 +400,7 @@ export function useWebRTC(roomId: string | null) {
       connectingRef.current = false;
       signalingChainRef.current = Promise.resolve();
       console.log('[Socket] Cleanup - disconnecting');
+      skipSocketDisconnectStateRef.current = true;
       socketRef.current?.close();
       socketRef.current = null;
     };
@@ -390,14 +411,15 @@ export function useWebRTC(roomId: string | null) {
     return () => {
       console.log('[WebRTC] Component unmounting, cleaning up');
       connectingRef.current = false;
+      // 后声明的 effect 先清理：若此处只把 ref 置空而不 close，roomId effect 的 cleanup 将无法关闭信令连接
+      skipSocketDisconnectStateRef.current = true;
+      socketRef.current?.close();
       socketRef.current = null;
-      // Clean up all peer connections
       peersRef.current.forEach((peer) => {
         peer.connection.close();
       });
       peersRef.current.clear();
       pendingIceCandidatesRef.current.clear();
-      setPeers(new Map());
     };
   }, []);
 
@@ -441,6 +463,10 @@ export function useWebRTC(roomId: string | null) {
       if (ev.errorCode === 701 && isTurn) {
         console.warn(
           '[WebRTC] 701：连不上该 TURN。公网 TURN 常被墙；本地像 PairDrop 一样只配 STUN 即可。需要中继时请自建 coturn 并设置 RTC_CONFIG（见 server/rtc_config.example.json）。'
+        );
+      } else if (ev.errorCode === 701 && !isTurn) {
+        console.warn(
+          '[WebRTC] 701：STUN binding 超时（常见于 IPv6 或网络抖动）。已内置多 STUN；若仍慢请检查防火墙/代理或部署 TURN。'
         );
       }
     };
@@ -532,7 +558,7 @@ export function useWebRTC(roomId: string | null) {
     // Data channel handling
     if (isInitiator) {
       const dataChannel = pc.createDataChannel('fileTransfer', {
-        ordered: true
+        ordered: false,
       });
       console.log('[WebRTC] Created data channel for:', peerId, 'readyState:', dataChannel.readyState);
       setupDataChannel(peerId, dataChannel);
@@ -633,14 +659,26 @@ export function useWebRTC(roomId: string | null) {
       try {
         await peer.connection.setRemoteDescription(answer);
         console.log('[WebRTC] Set remote description (answer) for:', senderId);
-        
-        // Add any buffered ICE candidates
+
         if (peer.iceCandidates.length > 0) {
           console.log('[WebRTC] Adding', peer.iceCandidates.length, 'buffered ICE candidates for:', senderId);
           for (const candidate of peer.iceCandidates) {
             await peer.connection.addIceCandidate(new RTCIceCandidate(candidate));
           }
           peer.iceCandidates = [];
+        }
+
+        const earlyPending = pendingIceCandidatesRef.current.get(senderId);
+        if (earlyPending && earlyPending.length > 0) {
+          console.log('[WebRTC] Adding', earlyPending.length, 'early trickle ICE (after answer) for:', senderId);
+          for (const candidate of earlyPending) {
+            try {
+              await peer.connection.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (e) {
+              console.error('[WebRTC] Error adding early ICE candidate (answer path):', e);
+            }
+          }
+          pendingIceCandidatesRef.current.delete(senderId);
         }
       } catch (err) {
         console.error('[WebRTC] Error handling answer:', err);
@@ -785,7 +823,26 @@ export function useWebRTC(roomId: string | null) {
                 orderedChunks.push(chunk);
               }
             }
-            
+            if (orderedChunks.length !== metadata.totalChunks) {
+              console.error(
+                '[DataChannel] 分片缺失，丢弃损坏文件:',
+                fileId,
+                `收到 ${orderedChunks.length}/${metadata.totalChunks}`
+              );
+              fileMetadataRef.current.delete(fileId);
+              receivedChunksRef.current.delete(fileId);
+              setTransfers((prev) => {
+                const updated = new Map(prev);
+                const t = updated.get(fileId);
+                if (t) {
+                  t.status = 'error';
+                  updated.set(fileId, t);
+                }
+                return updated;
+              });
+              return;
+            }
+
             const blob = new Blob(orderedChunks, { type: metadata.type });
             const receivedFile: ReceivedFile = {
               id: fileId,
@@ -832,7 +889,10 @@ export function useWebRTC(roomId: string | null) {
         
         const metadata = fileMetadataRef.current.get(fileId);
         if (metadata) {
-          const receivedBytes = chunks.size * CHUNK_SIZE;
+          let receivedBytes = 0;
+          chunks.forEach((buf) => {
+            receivedBytes += buf.byteLength;
+          });
           setTransfers(prev => {
             const updated = new Map(prev);
             const transfer = updated.get(fileId);
@@ -847,7 +907,7 @@ export function useWebRTC(roomId: string | null) {
   }, []);
 
   const sendFile = useCallback(async (file: File, targetPeerId?: string) => {
-    const fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     
     const peersToSend = targetPeerId

@@ -88,9 +88,10 @@ function App() {
   };
 
   const handleCopyRoomId = () => {
-    if (roomId) {
-      navigator.clipboard.writeText(roomId);
-    }
+    if (!roomId) return;
+    void navigator.clipboard.writeText(roomId).catch(() => {
+      alert('无法复制：请确认页面为 HTTPS 或 localhost，或手动选择房间号复制。');
+    });
   };
 
   // Show room join page if not in a room
