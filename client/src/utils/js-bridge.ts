@@ -1,5 +1,7 @@
 import dayjs from 'dayjs'
 
+import { DropReceiveFileItem } from './app-drop-protocol'
+
 /** 原生回调：入参为原生回传的任意 JSON/字符串等 */
 export type JSBridgeCallback = (data?: unknown) => void
 
@@ -181,7 +183,8 @@ class JsBridge {
       if (!this.registeredToNative.has(handlerName)) {
         this.registeredToNative.add(handlerName)
         originalRegisterHandler(handlerName, (data: unknown, callback?: JSBridgeCallback) => {
-          console.log(`[JsBridge] 收到原生调用 ${handlerName}，${dayjs().format('mm:ss.SSS')} 分发给 ${this.handlersMap.get(handlerName)?.size || 0} 个 handler`)
+          const logData = handlerName === 'dropReceiveFile' ? this.omitBase64ForLog(data) : data
+          console.log(`[JsBridge] 收到原生调用 ${handlerName}，${dayjs().format('mm:ss.SSS')} 分发给 ${this.handlersMap.get(handlerName)?.size || 0} 个 handler`, logData)
           const handlers = this.handlersMap.get(handlerName)
           console.log('handlers', handlerName, handlers?.size)
           if (handlers) {
@@ -236,13 +239,46 @@ class JsBridge {
   }
 
   /**
+   * 辅助方法：深拷贝数据并省略 base64 数据，用于打印日志
+   */
+  private omitBase64ForLog(data: unknown): unknown {
+    if (!data) return data
+    try {
+      const cloned = JSON.parse(JSON.stringify(data))
+      if (cloned && typeof cloned === 'object') {
+        if (Array.isArray(cloned.items)) {
+          cloned.items.forEach((item: DropReceiveFileItem) => {
+            if (item.data) item.data = '[BASE64_DATA_OMITTED]'
+            if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
+          })
+        } else if (Array.isArray(cloned.files)) {
+          cloned.files.forEach((item: DropReceiveFileItem) => {
+            if (item.data) item.data = '[BASE64_DATA_OMITTED]'
+            if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
+          })
+        } else if (cloned.file) {
+          if (cloned.file.data) cloned.file.data = '[BASE64_DATA_OMITTED]'
+          if (cloned.file.base64) cloned.file.base64 = '[BASE64_DATA_OMITTED]'
+        } else {
+          if (cloned.data) cloned.data = '[BASE64_DATA_OMITTED]'
+          if (cloned.base64) cloned.base64 = '[BASE64_DATA_OMITTED]'
+        }
+      }
+      return cloned
+    } catch {
+      return data
+    }
+  }
+
+  /**
    * 调用iOS原生方法
    * @param handlerName 处理器名称
    * @param data 数据
    * @param callback 回调函数
    */
   callHandler(handlerName: string, data?: unknown, callback?: JSBridgeCallback): void {
-    console.log(`[JsBridge] 调用处理器: ${handlerName}`, data)
+    const logData = ['dropLoadComplete', 'dropSelectFile', 'dropFileFlow', 'dropSaveFile'].includes(handlerName) ? this.omitBase64ForLog(data) : data
+    console.log(`[JsBridge] 调用处理器: ${handlerName}`, logData)
 
     if (!this.isNativeEmbedHost()) {
       console.warn('[JsBridge] 非 WebView 宿主环境，跳过 callHandler:', handlerName)
