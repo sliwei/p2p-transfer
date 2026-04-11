@@ -3,10 +3,10 @@ import type { ReceivedFile } from '../hooks/useWebRTC'
 interface ReceivedFilesModalProps {
   files: ReceivedFile[]
   onClose: () => void
-  onSaveToAlbum?: (file: ReceivedFile) => void
+  onDone: () => void
 }
 
-export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, onClose, onSaveToAlbum }) => {
+export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, onClose, onDone }) => {
   if (files.length === 0) return null
 
   return (
@@ -30,19 +30,11 @@ export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, o
                 <div className="text-[14px] text-[#333333] truncate">{file.name}</div>
                 <div className="text-[12px] text-[#999999]">{(file.size / 1024 / 1024).toFixed(2)} MB</div>
               </div>
-              {onSaveToAlbum && (
-                <button
-                  onClick={() => onSaveToAlbum(file)}
-                  className="shrink-0 px-3 py-1.5 bg-[#2266FE] text-white text-[12px] rounded-full hover:bg-[#1b52cc] transition-colors"
-                >
-                  存相册
-                </button>
-              )}
             </div>
           ))}
         </div>
         <div className="px-5 py-4 border-t border-[#F0F0F0]">
-          <button onClick={onClose} className="w-full py-2.5 bg-[#2266FE] text-white rounded-full font-medium hover:bg-[#1b52cc] transition-colors">
+          <button onClick={onDone} className="w-full py-2.5 bg-[#2266FE] text-white rounded-full font-medium hover:bg-[#1b52cc] transition-colors">
             完成
           </button>
         </div>

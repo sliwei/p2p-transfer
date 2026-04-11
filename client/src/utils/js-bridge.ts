@@ -181,9 +181,7 @@ class JsBridge {
       if (!this.registeredToNative.has(handlerName)) {
         this.registeredToNative.add(handlerName)
         originalRegisterHandler(handlerName, (data: unknown, callback?: JSBridgeCallback) => {
-          console.log(
-            `[JsBridge] 收到原生调用 ${handlerName}，${dayjs().format('mm:ss.SSS')} 分发给 ${this.handlersMap.get(handlerName)?.size || 0} 个 handler`
-          )
+          console.log(`[JsBridge] 收到原生调用 ${handlerName}，${dayjs().format('mm:ss.SSS')} 分发给 ${this.handlersMap.get(handlerName)?.size || 0} 个 handler`)
           const handlers = this.handlersMap.get(handlerName)
           console.log('handlers', handlerName, handlers?.size)
           if (handlers) {
@@ -213,7 +211,7 @@ class JsBridge {
 
   /** 是否可能为嵌入宿主（含 iOS/Android 注入链） */
   isNativeEmbedHost(): boolean {
-    return this.isIOSWebView() || !!this.window.WVJBCallbacks || !!this.window.WebViewJavascriptBridge
+    return this.isIOSWebView()
   }
 
   /** Bridge 已初始化且可 call/register */
@@ -234,9 +232,7 @@ class JsBridge {
     if (this.window.WebViewJavascriptBridge) {
       return true
     }
-    // 检查 UserAgent 中是否包含 iOS 设备标识或自定义标识
-    const userAgent = navigator.userAgent
-    return /iPhone|iPad|iPod/i.test(userAgent) || /wangxiao/i.test(userAgent)
+    return false
   }
 
   /**

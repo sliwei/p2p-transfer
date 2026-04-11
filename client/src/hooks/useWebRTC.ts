@@ -230,11 +230,18 @@ export interface ReceivedFile {
   timestamp: number;
 }
 
+export interface TransferRequest {
+  requestId: string;
+  fromPeerId: string;
+  filesInfo: { name: string; size: number }[];
+}
+
 export function useWebRTC(roomId: string | null) {
   const [myPeerId, setMyPeerId] = useState<string>('');
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map());
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
+  const [incomingRequests, setIncomingRequests] = useState<TransferRequest[]>([]);
   /** 信令（Socket）已加入房间；与 WebRTC 是否可传文件无关 */
   const [signalingInRoom, setSignalingInRoom] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -253,6 +260,7 @@ export function useWebRTC(roomId: string | null) {
   const transfersRef = useRef<Map<string, TransferProgress>>(new Map());
   const receivedChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map());
   const fileMetadataRef = useRef<Map<string, { name: string; size: number; type: string; totalChunks: number; fromPeerId: string }>>(new Map());
+  const pendingRequestsRef = useRef<Map<string, { resolve: () => void; reject: (reason: string) => void }>>(new Map());
   /** DataChannel 打开后解析 getStats，每渲染更新 .current */
   const refreshIcePathRef = useRef<(peerId: string) => void>(() => {});
 
@@ -295,7 +303,26 @@ export function useWebRTC(roomId: string | null) {
       // Metadata or control message
       try {
         const message = JSON.parse(data);
-        if (message.type === 'file-start') {
+        if (message.type === 'transfer-request') {
+          setIncomingRequests(prev => [
+            ...prev,
+            {
+              requestId: message.requestId,
+              fromPeerId: peerId,
+              filesInfo: message.filesInfo,
+            }
+          ]);
+        } else if (message.type === 'transfer-response') {
+          const pending = pendingRequestsRef.current.get(message.requestId);
+          if (pending) {
+            if (message.accepted) {
+              pending.resolve();
+            } else {
+              pending.reject('User rejected the transfer');
+            }
+            pendingRequestsRef.current.delete(message.requestId);
+          }
+        } else if (message.type === 'file-start') {
           // Initialize file reception
           const fileId = message.fileId;
           fileMetadataRef.current.set(fileId, {
@@ -1081,6 +1108,60 @@ export function useWebRTC(roomId: string | null) {
     return fileId;
   }, []);
 
+  const sendFilesBatch = useCallback(async (files: File[], targetPeerId: string) => {
+    const peer = peersRef.current.get(targetPeerId);
+    if (!peer || peer.status !== 'connected' || peer.dataChannel?.readyState !== 'open') {
+      throw new Error('Peer not connected');
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    const filesInfo = files.map(f => ({ name: f.name, size: f.size }));
+
+    // Send transfer request
+    const requestMessage = {
+      type: 'transfer-request',
+      requestId,
+      filesInfo
+    };
+
+    await waitUntilDataChannelCanSend(peer.dataChannel);
+    peer.dataChannel.send(JSON.stringify(requestMessage));
+
+    // Wait for response
+    await new Promise<void>((resolve, reject) => {
+      pendingRequestsRef.current.set(requestId, { resolve, reject });
+      // Optional timeout
+      setTimeout(() => {
+        if (pendingRequestsRef.current.has(requestId)) {
+          pendingRequestsRef.current.delete(requestId);
+          reject(new Error('Transfer request timeout'));
+        }
+      }, 60000); // 60 seconds timeout
+    });
+
+    // If accepted, send files one by one
+    for (const file of files) {
+      await sendFile(file, targetPeerId);
+    }
+  }, [sendFile]);
+
+  const respondToTransferRequest = useCallback((requestId: string, accepted: boolean) => {
+    setIncomingRequests(prev => {
+      const request = prev.find(r => r.requestId === requestId);
+      if (request) {
+        const peer = peersRef.current.get(request.fromPeerId);
+        if (peer && peer.dataChannel?.readyState === 'open') {
+          peer.dataChannel.send(JSON.stringify({
+            type: 'transfer-response',
+            requestId,
+            accepted
+          }));
+        }
+      }
+      return prev.filter(r => r.requestId !== requestId);
+    });
+  }, []);
+
   const downloadFile = useCallback((file: ReceivedFile) => {
     const url = URL.createObjectURL(file.blob);
     const a = document.createElement('a');
@@ -1104,6 +1185,9 @@ export function useWebRTC(roomId: string | null) {
     signalingInRoom,
     p2pFileTransferReady,
     sendFile,
+    sendFilesBatch,
+    incomingRequests,
+    respondToTransferRequest,
     downloadFile
   };
 }

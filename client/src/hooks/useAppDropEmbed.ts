@@ -2,10 +2,8 @@ import { useCallback, useEffect, useRef } from 'react'
 
 import {
   blobToBase64DataUrl,
-  type DropFileFlowPayload,
-  type DropSaveFilePayload,
-  filesFromDropReceivePayload,
-  stripDataUrlToBase64
+  type DropAppPayload,
+  filesFromDropReceivePayload
 } from '../utils/app-drop-protocol'
 import jsBridge, { type JSBridgeHandler } from '../utils/js-bridge'
 import type { ReceivedFile } from './useWebRTC'
@@ -28,25 +26,46 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
     jsBridge.dropSelectFile()
   }, [])
 
-  const notifyFileFlow = useCallback((payload: DropFileFlowPayload) => {
+  const notifyFileFlow = useCallback(async (file: File | ReceivedFile) => {
     if (!jsBridge.isBridgeReady()) return
-    jsBridge.dropFileFlow(payload)
+    try {
+      const blob = 'blob' in file ? file.blob : file
+      const dataUrl = await blobToBase64DataUrl(blob)
+      const mime = file.type || blob.type || 'application/octet-stream'
+      const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
+      
+      const payload: DropAppPayload = {
+        items: [{
+          name: file.name,
+          kind,
+          mime,
+          data: dataUrl
+        }]
+      }
+      jsBridge.dropFileFlow(payload)
+    } catch (e) {
+      console.error('[AppDrop] dropFileFlow error', e)
+    }
   }, [])
 
   const notifySaveToAlbum = useCallback(async (file: ReceivedFile) => {
     if (!jsBridge.isBridgeReady()) return
     try {
       const dataUrl = await blobToBase64DataUrl(file.blob)
-      const base64 = stripDataUrlToBase64(dataUrl)
-      const payload: DropSaveFilePayload = {
-        fileName: file.name,
-        fileSize: file.size,
-        base64,
-        mimeType: file.type || file.blob.type || undefined
+      const mime = file.type || file.blob.type || 'application/octet-stream'
+      const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
+
+      const payload: DropAppPayload = {
+        items: [{
+          name: file.name,
+          kind,
+          mime,
+          data: dataUrl
+        }]
       }
       jsBridge.dropSaveFile(payload)
     } catch (e) {
-      console.error('[AppDrop] dropSaveFile 读取 blob 失败', e)
+      console.error('[AppDrop] dropSaveFile error', e)
     }
   }, [])
 

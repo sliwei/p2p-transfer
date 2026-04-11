@@ -6,6 +6,7 @@ import { RadarView } from './components/RadarView'
 import { ReceivedFilesModal } from './components/ReceivedFilesModal'
 import { RoomJoin } from './components/RoomJoin'
 import { SelectedFilesList } from './components/SelectedFilesList'
+import { TransferRequestModal } from './components/TransferRequestModal'
 import { useAppDropEmbed } from './hooks/useAppDropEmbed'
 import { useRoom } from './hooks/useRoom'
 import { type ReceivedFile, useWebRTC } from './hooks/useWebRTC'
@@ -16,24 +17,20 @@ function App() {
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const { peers, transfers, receivedFiles, sendFile } = useWebRTC(roomId)
+  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile } = useWebRTC(roomId)
 
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
 
   const [selectedPeers, setSelectedPeers] = useState<string[]>([])
 
   const handleTogglePeer = useCallback((peerId: string) => {
-    setSelectedPeers(prev => 
-      prev.includes(peerId) 
-        ? prev.filter(id => id !== peerId)
-        : [...prev, peerId]
-    )
+    setSelectedPeers((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]))
   }, [])
 
   useEffect(() => {
     // Remove selected peers that are no longer ready
-    setSelectedPeers(prev => {
-      const filtered = prev.filter(id => readyPeers.some(p => p.id === id))
+    setSelectedPeers((prev) => {
+      const filtered = prev.filter((id) => readyPeers.some((p) => p.id === id))
       // Only set state if the array actually changed to avoid infinite loops
       if (filtered.length !== prev.length) {
         return filtered
@@ -48,6 +45,9 @@ function App() {
   const [showReceivedModal, setShowReceivedModal] = useState(false)
   const prevReceivingCountRef = useRef(0)
   const lastReceivedFilesRef = useRef<ReceivedFile[]>([])
+
+  const [receiveAction, setReceiveAction] = useState<'album' | 'chat' | null>(null)
+  const [pendingProcessFiles, setPendingProcessFiles] = useState<ReceivedFile[]>([])
 
   const onReceiveEmbedFiles = useCallback((files: File[]) => {
     if (!roomIdRef.current) {
@@ -73,29 +73,22 @@ function App() {
 
   const onReceivedFileInFlow = useCallback(
     (f: ReceivedFile) => {
-      notifyFileFlow({
-        direction: 'receive',
-        fileName: f.name,
-        fileSize: f.size,
-        fileId: f.id
-      })
+      notifyFileFlow(f)
     },
     [notifyFileFlow]
   )
 
   useEffect(() => {
-    const receivingTransfers = transfers.filter(t => t.direction === 'receiving')
-    const isReceiving = receivingTransfers.some(t => t.status === 'transferring')
-    const completedCount = receivingTransfers.filter(t => t.status === 'completed').length
+    const receivingTransfers = transfers.filter((t) => t.direction === 'receiving')
+    const isReceiving = receivingTransfers.some((t) => t.status === 'transferring')
+    const completedCount = receivingTransfers.filter((t) => t.status === 'completed').length
 
     if (!isReceiving && completedCount > 0 && completedCount > prevReceivingCountRef.current) {
       // Find the newly received files to show in the modal
       const newFiles = receivedFiles.slice(lastReceivedFilesRef.current.length)
       if (newFiles.length > 0) {
+        setPendingProcessFiles(newFiles)
         setShowReceivedModal(true)
-        if (jsBridge.isNativeEmbedHost()) {
-          newFiles.forEach(f => onReceivedFileInFlow(f))
-        }
       }
       prevReceivingCountRef.current = completedCount
       lastReceivedFilesRef.current = receivedFiles
@@ -108,21 +101,17 @@ function App() {
     try {
       // Send files to all selected peers
       for (const peerId of selectedPeers) {
+        await sendFilesBatch(selectedFiles, peerId)
         for (const file of selectedFiles) {
-          await sendFile(file, peerId)
-          notifyFileFlow({
-            direction: 'send',
-            fileName: file.name,
-            fileSize: file.size
-          })
+          notifyFileFlow(file)
         }
       }
       // Keep files selected or clear them? Usually clear after send.
       // setSelectedFiles([])
       setSelectedPeers([])
     } catch (error) {
-      console.error('Error sending files:', error)
-      alert('Failed to send files. Please check peer connections.')
+      // console.error('Error sending files:', error)
+      // alert('Failed to send files. Please check peer connections or user rejected.')
     } finally {
       setIsSending(false)
     }
@@ -175,12 +164,7 @@ function App() {
         </div>
 
         <div className="flex-1 pointer-events-auto">
-          <RadarView
-            peers={readyPeers}
-            selectedPeers={selectedPeers}
-            onTogglePeer={handleTogglePeer}
-            transfers={transfers}
-          />
+          <RadarView peers={readyPeers} selectedPeers={selectedPeers} onTogglePeer={handleTogglePeer} transfers={transfers} />
         </div>
 
         <div className="pointer-events-auto">
@@ -189,10 +173,45 @@ function App() {
 
         {showReceivedModal && (
           <div className="pointer-events-auto">
-            <ReceivedFilesModal
-              files={receivedFiles}
-              onClose={() => setShowReceivedModal(false)}
-              onSaveToAlbum={jsBridge.isNativeEmbedHost() ? notifySaveToAlbum : undefined}
+            <ReceivedFilesModal 
+              files={pendingProcessFiles} 
+              onClose={() => setShowReceivedModal(false)} 
+              onDone={() => {
+                setShowReceivedModal(false)
+                if (receiveAction === 'album') {
+                  if (jsBridge.isNativeEmbedHost()) {
+                    pendingProcessFiles.forEach((f) => notifySaveToAlbum(f))
+                  } else {
+                    pendingProcessFiles.forEach((f) => downloadFile(f))
+                  }
+                } else if (receiveAction === 'chat') {
+                  if (jsBridge.isNativeEmbedHost()) {
+                    pendingProcessFiles.forEach((f) => onReceivedFileInFlow(f))
+                  }
+                }
+                setPendingProcessFiles([])
+                setReceiveAction(null)
+              }} 
+            />
+          </div>
+        )}
+
+        {incomingRequests.length > 0 && (
+          <div className="pointer-events-auto">
+            <TransferRequestModal
+              peerName={incomingRequests[0].fromPeerId.slice(0, 6)}
+              fileCount={incomingRequests[0].filesInfo.length}
+              onAcceptAlbum={() => {
+                respondToTransferRequest(incomingRequests[0].requestId, true)
+                setReceiveAction('album')
+              }}
+              onAcceptChat={() => {
+                respondToTransferRequest(incomingRequests[0].requestId, true)
+                setReceiveAction('chat')
+              }}
+              onReject={() => {
+                respondToTransferRequest(incomingRequests[0].requestId, false)
+              }}
             />
           </div>
         )}

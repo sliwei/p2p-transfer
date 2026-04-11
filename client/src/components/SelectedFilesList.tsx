@@ -1,5 +1,7 @@
 import { useCallback, useRef } from 'react'
 
+import jsBridge from '../utils/js-bridge'
+
 interface SelectedFilesListProps {
   files: File[]
   onFilesChange: (files: File[]) => void
@@ -31,9 +33,13 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   )
 
   const handleSelectClick = () => {
-    onSelectMore()
-    if (fileInputRef.current) {
-      fileInputRef.current.click()
+    console.log('handleSelectClick', jsBridge.isNativeEmbedHost())
+    if (jsBridge.isNativeEmbedHost()) {
+      onSelectMore()
+    } else {
+      if (fileInputRef.current) {
+        fileInputRef.current.click()
+      }
     }
   }
 

@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "dayjs": "^1.11.20",
+    "eruda": "^3.4.3",
     "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
