@@ -1,6 +1,6 @@
 # GitHub Secrets（缺一不可）：KEY、DOCKER_USERNAME、DOCKER_PASSWORD、ENV
 # DOCKER_USERNAME = 阿里云「登录镜像」用户名（仅 DOCKER_PASSWORD 会报 Must provide --username）
-# ENV 写入服务器 /data/docker/awei/p2p-transfer/.env（每次部署覆盖）
+# ENV → 服务器 .env；须含 PEER_ID_SECRET=…（及你需要的 RTC_CONFIG 等），勿省略空行导致未写入
 # 修改主机：改下方 host / username / port
 
 name: build-and-deploy

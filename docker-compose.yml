@@ -3,12 +3,12 @@ services:
     restart: always
     container_name: p2p-transfer
     image: registry.cn-shenzhen.aliyuncs.com/sliwei/p2p-transfer:${TAG}
+    env_file:
+      - .env
     environment:
       PORT: "3001"
       CLIENT_DIST: /app/static
-      PEER_ID_SECRET: ${PEER_ID_SECRET:?在 .env 中设置 PEER_ID_SECRET}
-      # 可选：挂载 TURN 等配置 JSON，与 PairDrop 一致
-      # RTC_CONFIG: /app/server/rtc_config.json
+      # PEER_ID_SECRET、RTC_CONFIG 等放在同目录 .env（CI 的 secrets.ENV），不在此做 ${} 插值
     # volumes:
     #   - ./rtc_config.json:/app/server/rtc_config.json:ro
     networks:
