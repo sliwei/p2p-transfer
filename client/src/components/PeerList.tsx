@@ -25,9 +25,9 @@ export const PeerList: React.FC<PeerListProps> = ({
 
   const getStatusText = (status: Peer['status']) => {
     switch (status) {
-      case 'connected': return 'Connected';
-      case 'connecting': return 'Connecting...';
-      case 'disconnected': return 'Disconnected';
+      case 'connected': return 'Ready to transfer';
+      case 'connecting': return 'Negotiating...';
+      case 'disconnected': return 'Unavailable';
       default: return 'Unknown';
     }
   };

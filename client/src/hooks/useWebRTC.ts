@@ -97,6 +97,15 @@ function candidateLooksLikeTunnelFakeIp(candidateStr: string): boolean {
   return /198\.(18|19)\.\d{1,3}\.\d{1,3}/.test(candidateStr);
 }
 
+/** 仅以 DataChannel open 为「可传文件」；避免 PC connectionState=connected 但打洞/链路实际不可用时的误报 */
+function recomputePeerTransferStatus(p: Peer): Peer['status'] {
+  if (p.dataChannel?.readyState === 'open') return 'connected';
+  const cs = p.connection.connectionState;
+  const ice = p.connection.iceConnectionState;
+  if (cs === 'failed' || cs === 'closed' || ice === 'failed') return 'disconnected';
+  return 'connecting';
+}
+
 export interface Peer {
   id: string;
   connection: RTCPeerConnection;
@@ -131,7 +140,8 @@ export function useWebRTC(roomId: string | null) {
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map());
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
+  /** 信令（Socket）已加入房间；与 WebRTC 是否可传文件无关 */
+  const [signalingInRoom, setSignalingInRoom] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   /** 信令层稳定 id（与 socket.id 解耦），用于比较 peer-joined / 协商发起方 */
   const myStablePeerIdRef = useRef<string>('');
@@ -204,7 +214,7 @@ export function useWebRTC(roomId: string | null) {
           peers: string[];
         }) => {
         console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId);
-        setIsConnected(true);
+        setSignalingInRoom(true);
         myStablePeerIdRef.current = peerId;
         setMyPeerId(peerId);
         if (peerIdHash) {
@@ -261,7 +271,7 @@ export function useWebRTC(roomId: string | null) {
 
       newSocket.on('disconnect', () => {
         console.log('[Socket] Disconnected');
-        setIsConnected(false);
+        setSignalingInRoom(false);
         peersRef.current.forEach((p) => p.connection.close());
         peersRef.current.clear();
         pendingIceCandidatesRef.current.clear();
@@ -392,19 +402,10 @@ export function useWebRTC(roomId: string | null) {
 
     pc.onconnectionstatechange = () => {
       console.log(`[WebRTC] Connection state with ${peerId}:`, pc.connectionState);
-      
-      const newStatus =
-        pc.connectionState === 'connected'
-          ? 'connected'
-          : pc.connectionState === 'disconnected' ||
-              pc.connectionState === 'failed' ||
-              pc.connectionState === 'closed'
-            ? 'disconnected'
-            : 'connecting';
-      
-      // Always update ref first (this is the source of truth)
+
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
+        const newStatus = recomputePeerTransferStatus(peerInRef);
         peerInRef.status = newStatus;
         console.log(`[WebRTC] Updated peer ${peerId} status to ${newStatus}, ref size:`, peersRef.current.size);
       }
@@ -426,6 +427,11 @@ export function useWebRTC(roomId: string | null) {
         console.warn(
           '[WebRTC] ICE 失败常见原因：① 若 host 出现 198.18.x（见上文警告）→ 关掉 Clash/Surge TUN 或 Fake-IP；② 对称 NAT（仅 srflx、无 relay）→ coturn + RTC_CONFIG；③ mDNS（.local）→ Chrome 关闭 WebRTC 隐藏本地 IP；④ 本机测试用 http://127.0.0.1:5173 双标签。'
         );
+      }
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        setPeers(new Map(peersRef.current));
       }
     };
     
@@ -611,22 +617,30 @@ export function useWebRTC(roomId: string | null) {
     dataChannel.bufferedAmountLowThreshold = DC_SEND_BUFFER_HIGH_WATER;
     dataChannel.onopen = () => {
       console.log('[DataChannel] Opened with:', peerId);
-      // Update ref first
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
         peerInRef.dataChannel = dataChannel;
-        peerInRef.status = 'connected';
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
       }
-      // Then sync to state
       setPeers(new Map(peersRef.current));
     };
 
     dataChannel.onclose = () => {
       console.log('[DataChannel] Closed with:', peerId);
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        setPeers(new Map(peersRef.current));
+      }
     };
 
     dataChannel.onerror = (error) => {
       console.error('[DataChannel] Error:', error);
+      const peerInRef = peersRef.current.get(peerId);
+      if (peerInRef) {
+        peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        setPeers(new Map(peersRef.current));
+      }
     };
 
     dataChannel.onmessage = (event) => {
@@ -743,9 +757,15 @@ export function useWebRTC(roomId: string | null) {
     const fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     
-    const peersToSend = targetPeerId 
-      ? [peersRef.current.get(targetPeerId)].filter(Boolean) as Peer[]
-      : Array.from(peersRef.current.values()).filter(p => p.status === 'connected' && p.dataChannel?.readyState === 'open');
+    const peersToSend = targetPeerId
+      ? (() => {
+          const p = peersRef.current.get(targetPeerId);
+          if (p && p.status === 'connected' && p.dataChannel?.readyState === 'open') return [p];
+          return [];
+        })()
+      : Array.from(peersRef.current.values()).filter(
+          (p) => p.status === 'connected' && p.dataChannel?.readyState === 'open'
+        );
     
     if (peersToSend.length === 0) {
       throw new Error('No connected peers available');
@@ -856,12 +876,17 @@ export function useWebRTC(roomId: string | null) {
     URL.revokeObjectURL(url);
   }, []);
 
+  const p2pFileTransferReady = Array.from(peers.values()).some(
+    (p) => p.dataChannel?.readyState === 'open'
+  );
+
   return {
     myPeerId,
     peers: Array.from(peers.values()),
     transfers: Array.from(transfers.values()),
     receivedFiles,
-    isConnected,
+    signalingInRoom,
+    p2pFileTransferReady,
     sendFile,
     downloadFile
   };

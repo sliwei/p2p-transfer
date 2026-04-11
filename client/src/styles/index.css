@@ -198,6 +198,16 @@ html, body {
   color: var(--warning);
 }
 
+.connection-status.pending-p2p .status-dot {
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning);
+  animation: pulse 1.5s infinite;
+}
+
+.connection-status.pending-p2p {
+  color: var(--warning);
+}
+
 .header-right {
   display: flex;
   align-items: center;

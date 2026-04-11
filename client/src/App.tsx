@@ -24,10 +24,31 @@ function App() {
     peers, 
     transfers, 
     receivedFiles, 
-    isConnected, 
+    signalingInRoom,
+    p2pFileTransferReady,
     sendFile, 
     downloadFile 
   } = useWebRTC(roomId);
+
+  const headerConnection = (() => {
+    if (!signalingInRoom) {
+      return { className: 'disconnected', text: 'Connecting to server...' };
+    }
+    if (p2pFileTransferReady) {
+      return { className: 'connected', text: 'P2P ready — you can transfer files' };
+    }
+    if (peers.length === 0) {
+      return { className: 'pending-p2p', text: 'In room — waiting for peer' };
+    }
+    const allFailed = peers.every((p) => p.status === 'disconnected');
+    if (allFailed) {
+      return {
+        className: 'disconnected',
+        text: 'P2P unavailable — same LAN, TURN, or network setup required',
+      };
+    }
+    return { className: 'pending-p2p', text: 'Establishing P2P link...' };
+  })();
 
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -98,9 +119,9 @@ function App() {
               </svg>
             </button>
           </div>
-          <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
+          <div className={`connection-status ${headerConnection.className}`}>
             <span className="status-dot" />
-            <span className="status-text">{isConnected ? 'Connected' : 'Connecting...'}</span>
+            <span className="status-text">{headerConnection.text}</span>
           </div>
         </div>
 
