@@ -17,7 +17,7 @@ function App() {
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile, myPeerId, myPeerName, myDeviceType } = useWebRTC(roomId)
+  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile, myPeerId, myPeerName } = useWebRTC(roomId)
 
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
 
@@ -99,13 +99,15 @@ function App() {
 
     setIsSending(true)
     try {
-      // Send files to all selected peers
-      for (const peerId of selectedPeers) {
-        await sendFilesBatch(selectedFiles, peerId)
-        for (const file of selectedFiles) {
-          notifyFileFlow(file)
-        }
-      }
+      // Send files to all selected peers concurrently
+      await Promise.allSettled(
+        selectedPeers.map(async (peerId) => {
+          await sendFilesBatch(selectedFiles, peerId)
+          for (const file of selectedFiles) {
+            notifyFileFlow(file)
+          }
+        })
+      )
       // Keep files selected or clear them? Usually clear after send.
       // setSelectedFiles([])
       setSelectedPeers([])
