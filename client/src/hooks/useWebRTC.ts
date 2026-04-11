@@ -106,12 +106,91 @@ function recomputePeerTransferStatus(p: Peer): Peer['status'] {
   return 'connecting';
 }
 
+export type IceTransportPath = 'relay' | 'direct' | 'unknown';
+
+/**
+ * 根据 getStats 选中 candidate-pair 判断：任一端 candidateType 为 relay 即经 TURN 中继。
+ */
+async function detectIceTransportPath(pc: RTCPeerConnection): Promise<{
+  path: IceTransportPath;
+  detail: string;
+}> {
+  try {
+    const stats = await pc.getStats();
+    const byId = new Map<string, Record<string, unknown>>();
+
+    stats.forEach((report) => {
+      const r = report as unknown as Record<string, unknown>;
+      const id = typeof r.id === 'string' ? r.id : '';
+      if (id) byId.set(id, r);
+    });
+
+    let selectedPairId: string | undefined;
+    stats.forEach((report) => {
+      const r = report as unknown as Record<string, unknown>;
+      if (r.type === 'transport' && typeof r.selectedCandidatePairId === 'string') {
+        selectedPairId = r.selectedCandidatePairId;
+      }
+    });
+
+    if (!selectedPairId) {
+      let nominatedId: string | undefined;
+      let succeededId: string | undefined;
+      stats.forEach((report) => {
+        const r = report as unknown as Record<string, unknown>;
+        if (r.type !== 'candidate-pair') return;
+        const id = typeof r.id === 'string' ? r.id : '';
+        if (!id) return;
+        if (r.nominated === true) nominatedId = id;
+        if (r.state === 'succeeded') succeededId = id;
+      });
+      selectedPairId = nominatedId ?? succeededId;
+    }
+
+    if (!selectedPairId) {
+      return { path: 'unknown', detail: '无选中 candidate-pair' };
+    }
+
+    const pair = byId.get(selectedPairId);
+    if (!pair || pair.type !== 'candidate-pair') {
+      return { path: 'unknown', detail: 'pair 记录缺失' };
+    }
+
+    const localCid = pair.localCandidateId as string | undefined;
+    const remoteCid = pair.remoteCandidateId as string | undefined;
+
+    const readType = (cid: string | undefined): string | undefined => {
+      if (!cid) return undefined;
+      const c = byId.get(cid);
+      if (!c) return undefined;
+      const t = c.candidateType as string | undefined;
+      if (t) return t;
+      return undefined;
+    };
+
+    const localType = readType(localCid);
+    const remoteType = readType(remoteCid);
+    const detail = `local=${localType ?? '?'} remote=${remoteType ?? '?'}`;
+    if (!localType && !remoteType) {
+      return { path: 'unknown', detail };
+    }
+    const relay = localType === 'relay' || remoteType === 'relay';
+    return { path: relay ? 'relay' : 'direct', detail };
+  } catch (e) {
+    return { path: 'unknown', detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export interface Peer {
   id: string;
   connection: RTCPeerConnection;
   dataChannel?: RTCDataChannel;
   status: 'connecting' | 'connected' | 'disconnected';
   iceCandidates: RTCIceCandidateInit[]; // Buffer for ICE candidates before remote description is set
+  /** 由 getStats 解析；DataChannel 打开后异步写入 */
+  iceTransportPath?: IceTransportPath;
+  /** 如 local=srflx remote=relay */
+  iceTransportDetail?: string;
 }
 
 export interface TransferProgress {
@@ -156,6 +235,8 @@ export function useWebRTC(roomId: string | null) {
   const transfersRef = useRef<Map<string, TransferProgress>>(new Map());
   const receivedChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map());
   const fileMetadataRef = useRef<Map<string, { name: string; size: number; type: string; totalChunks: number; fromPeerId: string }>>(new Map());
+  /** DataChannel 打开后解析 getStats，每渲染更新 .current */
+  const refreshIcePathRef = useRef<(peerId: string) => void>(() => {});
 
   // Update refs when state changes
   useEffect(() => {
@@ -417,6 +498,11 @@ export function useWebRTC(roomId: string | null) {
       // Clean up failed connections
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         setTimeout(() => removePeer(peerId), 1000);
+      } else if (
+        pc.connectionState === 'connected' &&
+        peerInRef?.dataChannel?.readyState === 'open'
+      ) {
+        refreshIcePathRef.current(peerId);
       }
     };
     
@@ -621,14 +707,19 @@ export function useWebRTC(roomId: string | null) {
       if (peerInRef) {
         peerInRef.dataChannel = dataChannel;
         peerInRef.status = recomputePeerTransferStatus(peerInRef);
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
       }
       setPeers(new Map(peersRef.current));
+      refreshIcePathRef.current(peerId);
     };
 
     dataChannel.onclose = () => {
       console.log('[DataChannel] Closed with:', peerId);
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
         peerInRef.status = recomputePeerTransferStatus(peerInRef);
         setPeers(new Map(peersRef.current));
       }
@@ -638,6 +729,8 @@ export function useWebRTC(roomId: string | null) {
       console.error('[DataChannel] Error:', error);
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
+        peerInRef.iceTransportPath = undefined;
+        peerInRef.iceTransportDetail = undefined;
         peerInRef.status = recomputePeerTransferStatus(peerInRef);
         setPeers(new Map(peersRef.current));
       }
@@ -879,6 +972,25 @@ export function useWebRTC(roomId: string | null) {
   const p2pFileTransferReady = Array.from(peers.values()).some(
     (p) => p.dataChannel?.readyState === 'open'
   );
+
+  refreshIcePathRef.current = (peerId: string) => {
+    const run = async () => {
+      const p = peersRef.current.get(peerId);
+      if (!p?.connection || p.connection.connectionState === 'closed') return;
+      const { path, detail } = await detectIceTransportPath(p.connection);
+      const cur = peersRef.current.get(peerId);
+      if (!cur || cur.connection !== p.connection) return;
+      cur.iceTransportPath = path;
+      cur.iceTransportDetail = detail;
+      const pathCn =
+        path === 'relay' ? 'TURN 中继' : path === 'direct' ? '直联(非 relay)' : '未知';
+      console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail);
+      setPeers(new Map(peersRef.current));
+    };
+    void run();
+    window.setTimeout(() => void run(), 400);
+    window.setTimeout(() => void run(), 1500);
+  };
 
   return {
     myPeerId,

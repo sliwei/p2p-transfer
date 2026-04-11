@@ -77,6 +77,24 @@ export const PeerList: React.FC<PeerListProps> = ({
               <div className="peer-details">
                 <span className="peer-name">Peer</span>
                 <span className="peer-id">{formatPeerId(peer.id)}</span>
+                <span
+                  className={`peer-ice-path ${
+                    peer.iceTransportPath === 'relay'
+                      ? 'relay'
+                      : peer.iceTransportPath === 'direct'
+                        ? 'direct'
+                        : ''
+                  }`}
+                  title={peer.iceTransportDetail ?? undefined}
+                >
+                  {peer.iceTransportPath === 'relay'
+                    ? 'TURN 中继'
+                    : peer.iceTransportPath === 'direct'
+                      ? '直联'
+                      : peer.iceTransportPath === 'unknown'
+                        ? '路径未知'
+                        : '检测 ICE 路径…'}
+                </span>
               </div>
             </div>
             <div className="peer-status">

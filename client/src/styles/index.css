@@ -568,6 +568,21 @@ html, body {
   color: var(--text-muted);
 }
 
+.peer-ice-path {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.peer-ice-path.relay {
+  color: var(--warning);
+}
+
+.peer-ice-path.direct {
+  color: var(--success);
+}
+
 .peer-status {
   display: flex;
   align-items: center;
