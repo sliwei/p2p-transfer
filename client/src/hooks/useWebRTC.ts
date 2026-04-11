@@ -66,11 +66,14 @@ async function fetchRtcConfig(): Promise<RTCConfiguration> {
   return normalizeRtcConfig(await res.json());
 }
 
-/** 较大分片减少 SCTP/JS 次数，利于高延迟链路吞吐（接收端按 chunkIndex 重组，与 ordered 无关） */
-const CHUNK_SIZE = 256 * 1024;
+/**
+ * 单条 DC 消息 = 包头(4+fileId+4)+payload。SCTP/WebRTC 对单条用户消息常见上限约 64KB，
+ * 256KB 分片易触发 OperationError: Failure to send data 并导致通道关闭。
+ */
+const CHUNK_SIZE = 32 * 1024;
 
-/** 允许更多数据在途，提高 BDP 利用率；过大占内存，4MB 为较均衡默认值 */
-const DC_SEND_BUFFER_HIGH_WATER = 4 * 1024 * 1024;
+/** 允许更多数据在途；与较小分片搭配，略降阈值以便更早背压 */
+const DC_SEND_BUFFER_HIGH_WATER = 2 * 1024 * 1024;
 
 async function waitUntilDataChannelCanSend(dc: RTCDataChannel, limit = DC_SEND_BUFFER_HIGH_WATER): Promise<void> {
   if (dc.readyState !== 'open') {
@@ -420,6 +423,7 @@ export function useWebRTC(roomId: string | null) {
     });
   }, []);
   const setupDataChannel = useCallback((peerId: string, dataChannel: RTCDataChannel) => {
+    dataChannel.binaryType = 'arraybuffer';
     dataChannel.bufferedAmountLowThreshold = DC_SEND_BUFFER_HIGH_WATER;
     dataChannel.onopen = () => {
       console.log('[DataChannel] Opened with:', peerId);
@@ -446,7 +450,12 @@ export function useWebRTC(roomId: string | null) {
     };
 
     dataChannel.onerror = (error) => {
-      console.error('[DataChannel] Error:', error);
+      const err = (error as RTCErrorEvent).error;
+      console.error(
+        '[DataChannel] Error:',
+        peerId.slice(0, 12),
+        err instanceof Error ? err.message : error
+      );
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
         peerInRef.iceTransportPath = undefined;
@@ -971,70 +980,94 @@ export function useWebRTC(roomId: string | null) {
       totalChunks
     };
 
-    for (const peer of peersToSend) {
-      if (peer.dataChannel?.readyState === 'open') {
-        await waitUntilDataChannelCanSend(peer.dataChannel);
-        peer.dataChannel.send(JSON.stringify(metadata));
-      }
-    }
-
-    // Send file chunks
-    let sentBytes = 0;
-    const startTime = Date.now();
-    
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      const chunk = file.slice(start, end);
-      const arrayBuffer = await chunk.arrayBuffer();
-      
-      // Create chunk packet: [fileIdLength: 4 bytes][fileId: N bytes][chunkIndex: 4 bytes][data]
-      const fileIdBytes = new TextEncoder().encode(fileId);
-      const packet = new ArrayBuffer(4 + fileIdBytes.length + 4 + arrayBuffer.byteLength);
-      const view = new DataView(packet);
-      
-      view.setUint32(0, fileIdBytes.length);
-      new Uint8Array(packet, 4, fileIdBytes.length).set(fileIdBytes);
-      view.setUint32(4 + fileIdBytes.length, i);
-      new Uint8Array(packet, 8 + fileIdBytes.length).set(new Uint8Array(arrayBuffer));
-      
-      for (const peer of peersToSend) {
-        if (peer.dataChannel?.readyState === 'open') {
-          await waitUntilDataChannelCanSend(peer.dataChannel);
-          peer.dataChannel.send(packet);
-        }
-      }
-
-      sentBytes += arrayBuffer.byteLength;
-      const elapsed = (Date.now() - startTime) / 1000;
-      const speed = elapsed > 0 ? sentBytes / elapsed : 0;
-
-      setTransfers(prev => {
+    const markTransferError = (reason: string) => {
+      console.error('[WebRTC] sendFile:', reason);
+      setTransfers((prev) => {
         const updated = new Map(prev);
         const transfer = updated.get(fileId);
         if (transfer) {
-          transfer.sentBytes = sentBytes;
-          transfer.speed = speed;
+          transfer.status = 'error';
+          updated.set(fileId, transfer);
         }
         return updated;
       });
-    }
+    };
 
-    for (const peer of peersToSend) {
-      if (peer.dataChannel?.readyState === 'open') {
-        await waitUntilDataChannelCanSend(peer.dataChannel);
-        peer.dataChannel.send(JSON.stringify({ type: 'file-complete', fileId }));
+    try {
+      for (const peer of peersToSend) {
+        if (peer.dataChannel?.readyState === 'open') {
+          await waitUntilDataChannelCanSend(peer.dataChannel);
+          peer.dataChannel.send(JSON.stringify(metadata));
+        }
       }
-    }
 
-    setTransfers(prev => {
-      const updated = new Map(prev);
-      const transfer = updated.get(fileId);
-      if (transfer) {
-        transfer.status = 'completed';
+      // Send file chunks
+      let sentBytes = 0;
+      const startTime = Date.now();
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+        const arrayBuffer = await chunk.arrayBuffer();
+
+        // Create chunk packet: [fileIdLength: 4 bytes][fileId: N bytes][chunkIndex: 4 bytes][data]
+        const fileIdBytes = new TextEncoder().encode(fileId);
+        const packet = new ArrayBuffer(4 + fileIdBytes.length + 4 + arrayBuffer.byteLength);
+        const view = new DataView(packet);
+
+        view.setUint32(0, fileIdBytes.length);
+        new Uint8Array(packet, 4, fileIdBytes.length).set(fileIdBytes);
+        view.setUint32(4 + fileIdBytes.length, i);
+        new Uint8Array(packet, 8 + fileIdBytes.length).set(new Uint8Array(arrayBuffer));
+
+        for (const peer of peersToSend) {
+          if (peer.dataChannel?.readyState === 'open') {
+            await waitUntilDataChannelCanSend(peer.dataChannel);
+            try {
+              peer.dataChannel.send(packet);
+            } catch (sendErr) {
+              const msg = sendErr instanceof Error ? sendErr.message : String(sendErr);
+              throw new Error(`发送分片失败 (${i + 1}/${totalChunks}): ${msg}`);
+            }
+          }
+        }
+
+        sentBytes += arrayBuffer.byteLength;
+        const elapsed = (Date.now() - startTime) / 1000;
+        const speed = elapsed > 0 ? sentBytes / elapsed : 0;
+
+        setTransfers((prev) => {
+          const updated = new Map(prev);
+          const transfer = updated.get(fileId);
+          if (transfer) {
+            transfer.sentBytes = sentBytes;
+            transfer.speed = speed;
+          }
+          return updated;
+        });
       }
-      return updated;
-    });
+
+      for (const peer of peersToSend) {
+        if (peer.dataChannel?.readyState === 'open') {
+          await waitUntilDataChannelCanSend(peer.dataChannel);
+          peer.dataChannel.send(JSON.stringify({ type: 'file-complete', fileId }));
+        }
+      }
+
+      setTransfers((prev) => {
+        const updated = new Map(prev);
+        const transfer = updated.get(fileId);
+        if (transfer) {
+          transfer.status = 'completed';
+        }
+        return updated;
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      markTransferError(msg);
+      throw e;
+    }
 
     return fileId;
   }, []);
