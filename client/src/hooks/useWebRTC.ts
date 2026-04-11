@@ -199,6 +199,8 @@ async function detectIceTransportPath(pc: RTCPeerConnection): Promise<{
 
 export interface Peer {
   id: string;
+  name?: string;
+  deviceType?: string;
   connection: RTCPeerConnection;
   dataChannel?: RTCDataChannel;
   status: 'connecting' | 'connected' | 'disconnected';
@@ -238,6 +240,8 @@ export interface TransferRequest {
 
 export function useWebRTC(roomId: string | null) {
   const [myPeerId, setMyPeerId] = useState<string>('');
+  const [myPeerName, setMyPeerName] = useState<string>('');
+  const [myDeviceType, setMyDeviceType] = useState<string>('');
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map());
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
@@ -849,17 +853,23 @@ export function useWebRTC(roomId: string | null) {
           roomId: joinedRoomId,
           peerId,
           peerIdHash,
+          name,
+          deviceType,
           peers: existingPeers,
         }: {
           roomId: string;
           peerId: string;
           peerIdHash: string;
+          name?: string;
+          deviceType?: string;
           peers: string[];
         }) => {
         console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId);
         setSignalingInRoom(true);
         myStablePeerIdRef.current = peerId;
         setMyPeerId(peerId);
+        if (name) setMyPeerName(name);
+        if (deviceType) setMyDeviceType(deviceType);
         if (peerIdHash) {
           savePeerAuth(peerId, peerIdHash);
         }
@@ -1179,6 +1189,8 @@ export function useWebRTC(roomId: string | null) {
 
   return {
     myPeerId,
+    myPeerName,
+    myDeviceType,
     peers: Array.from(peers.values()),
     transfers: Array.from(transfers.values()),
     receivedFiles,

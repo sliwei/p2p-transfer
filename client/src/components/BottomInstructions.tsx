@@ -6,7 +6,7 @@ interface BottomInstructionsProps {
 
 export const BottomInstructions: React.FC<BottomInstructionsProps> = ({ roomLink }) => {
   return (
-    <div className="w-full px-4 py-6 flex gap-4 items-start border-t border-[#F5F5F5]">
+    <div className="w-full px-4 py-6 flex gap-4 items-start">
       <div className="flex flex-col items-center shrink-0">
         <div className="w-24 h-24 bg-white p-1 rounded-lg border border-[#E5E5E5] flex items-center justify-center">
           <QRCodeSVG value={roomLink} size={88} />

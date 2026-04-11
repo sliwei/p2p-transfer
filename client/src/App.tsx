@@ -17,7 +17,7 @@ function App() {
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile } = useWebRTC(roomId)
+  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile, myPeerId, myPeerName, myDeviceType } = useWebRTC(roomId)
 
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
 
@@ -129,7 +129,7 @@ function App() {
 
       <div className="fixed left-1/2 top-[62%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-0">
         <div className="w-14 h-14 rounded-full flex items-center justify-center mb-2">
-          <svg className="w-[80px] h-[80px]" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="7311">
+          <svg className="w-[100px] h-[100px]" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="7311">
             <path d="M460.8 511.880533a51.080533 51.080533 0 1 0 102.161067 0 51.080533 51.080533 0 0 0-102.161067 0z" p-id="7312" fill="#2266FF"></path>
             <path
               d="M565.4784 664.0128a27.4688 27.4688 0 0 1-11.170133-52.548267 100.164267 100.164267 0 1 0-83.601067-0.938666 27.4688 27.4688 0 0 1-23.517867 49.646933 155.136 155.136 0 1 1 129.5104 1.467733 27.306667 27.306667 0 0 1-11.221333 2.372267z"
@@ -148,7 +148,9 @@ function App() {
             ></path>
           </svg>
         </div>
-        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-2 rounded-full">闺蜜机1</span>
+        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-2 rounded-full">
+          {myPeerName || myPeerId.slice(0, 4)}
+        </span>
       </div>
 
       <div className="relative z-10 flex flex-col min-h-screen pointer-events-none">
@@ -173,9 +175,9 @@ function App() {
 
         {showReceivedModal && (
           <div className="pointer-events-auto">
-            <ReceivedFilesModal 
-              files={pendingProcessFiles} 
-              onClose={() => setShowReceivedModal(false)} 
+            <ReceivedFilesModal
+              files={pendingProcessFiles}
+              onClose={() => setShowReceivedModal(false)}
               onDone={() => {
                 setShowReceivedModal(false)
                 if (receiveAction === 'album') {
@@ -191,7 +193,7 @@ function App() {
                 }
                 setPendingProcessFiles([])
                 setReceiveAction(null)
-              }} 
+              }}
             />
           </div>
         )}
