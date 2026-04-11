@@ -4,13 +4,16 @@ import { Peer } from '../hooks/useWebRTC';
 interface PeerListProps {
   peers: Peer[];
   myPeerId: string;
+  /** 至少已与一对端建立可传文件的 DataChannel */
+  p2pReady: boolean;
   selectedPeer: string | null;
   onSelectPeer: (peerId: string | null) => void;
 }
 
 export const PeerList: React.FC<PeerListProps> = ({ 
   peers, 
-  myPeerId, 
+  myPeerId,
+  p2pReady,
   selectedPeer, 
   onSelectPeer 
 }) => {
@@ -38,7 +41,7 @@ export const PeerList: React.FC<PeerListProps> = ({
 
   return (
     <div className="peer-list">
-      <h3 className="peer-list-title">Connected Peers</h3>
+      <h3 className="peer-list-title">Peers (direct link only)</h3>
       
       <div className="peer-item peer-item-local">
         <div className="peer-info">
@@ -49,15 +52,18 @@ export const PeerList: React.FC<PeerListProps> = ({
           </div>
         </div>
         <div className="peer-status">
-          <span className="status-dot" style={{ backgroundColor: '#00ff88' }} />
-          <span className="status-text">Online</span>
+          <span
+            className="status-dot"
+            style={{ backgroundColor: p2pReady ? '#00ff88' : '#ffaa00' }}
+          />
+          <span className="status-text">{p2pReady ? 'Direct link ready' : 'In room only'}</span>
         </div>
       </div>
 
       {peers.length === 0 ? (
         <div className="peer-empty">
           <span className="peer-empty-icon">👤</span>
-          <span>Waiting for peers...</span>
+          <span>No peer shown until P2P works (same Wi‑Fi often required)</span>
         </div>
       ) : (
         peers.map(peer => (

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useRoom } from './hooks/useRoom';
 import { useWebRTC } from './hooks/useWebRTC';
 import { RoomJoin } from './components/RoomJoin';
@@ -30,6 +30,20 @@ function App() {
     downloadFile 
   } = useWebRTC(roomId);
 
+  /** 仅展示已建立 DataChannel 的对端；信令「同房间」不显示为对方在线 */
+  const readyPeers = useMemo(
+    () => peers.filter((p) => p.status === 'connected'),
+    [peers]
+  );
+
+  const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedPeer !== null && !readyPeers.some((p) => p.id === selectedPeer)) {
+      setSelectedPeer(null);
+    }
+  }, [selectedPeer, readyPeers]);
+
   const headerConnection = (() => {
     if (!signalingInRoom) {
       return { className: 'disconnected', text: 'Connecting to server...' };
@@ -44,13 +58,11 @@ function App() {
     if (allFailed) {
       return {
         className: 'disconnected',
-        text: 'P2P unavailable — same LAN, TURN, or network setup required',
+        text: 'Direct link failed — use same Wi‑Fi or configure TURN',
       };
     }
-    return { className: 'pending-p2p', text: 'Establishing P2P link...' };
+    return { className: 'pending-p2p', text: 'Trying direct P2P (not shown until it works)...' };
   })();
-
-  const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isSending, setIsSending] = useState(false);
 
@@ -136,8 +148,9 @@ function App() {
         <div className="main-grid">
           <div className="sidebar">
             <PeerList
-              peers={peers}
+              peers={readyPeers}
               myPeerId={myPeerId}
+              p2pReady={p2pFileTransferReady}
               selectedPeer={selectedPeer}
               onSelectPeer={setSelectedPeer}
             />
@@ -158,7 +171,7 @@ function App() {
                   <button 
                     className="btn btn-primary btn-large"
                     onClick={handleSendFiles}
-                    disabled={isSending || peers.filter(p => p.status === 'connected').length === 0}
+                    disabled={isSending || readyPeers.length === 0}
                   >
                     {isSending ? (
                       <>
@@ -175,8 +188,8 @@ function App() {
                       </>
                     )}
                   </button>
-                  {peers.filter(p => p.status === 'connected').length === 0 && (
-                    <p className="send-warning">Waiting for peers to connect...</p>
+                  {readyPeers.length === 0 && (
+                    <p className="send-warning">No direct link yet — peer appears here only when transfer is possible</p>
                   )}
                 </div>
               )}
