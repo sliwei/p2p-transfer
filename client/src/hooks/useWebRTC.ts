@@ -2,7 +2,6 @@ import { generateCuteNickname } from 'cute-nickname'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
-import { describeFileForLog } from '../utils/app-drop-protocol'
 import { triggerBrowserDownload } from '../utils/triggerDownload'
 
 /** 本机开发：信令与 rtc-config 统一走 127.0.0.1:3001（IPv4），避免 localhost 解析到 ::1 与 WebRTC 的 127.0.0.1 host 候选混用；并与仅用「局域网 IP 打开页面」时的行为区分。 */
@@ -416,14 +415,12 @@ export function useWebRTC(roomId: string | null) {
         const { path, detail } = await detectIceTransportPath(p.connection)
         const cur = peersRef.current.get(peerId)
         if (!cur || cur.connection !== p.connection) return
-        const pathCn = path === 'relay' ? 'TURN 中继' : path === 'direct' ? '直联(非 relay)' : '未知'
         setPeers((prev) => {
           const newPeers = new Map(prev)
           const currentPeer = newPeers.get(peerId)
           if (currentPeer && currentPeer.connection === p.connection && (currentPeer.iceTransportPath !== path || currentPeer.iceTransportDetail !== detail)) {
             currentPeer.iceTransportPath = path
             currentPeer.iceTransportDetail = detail
-            console.log('[WebRTC] 对端', peerId.slice(0, 12), '传输路径:', pathCn, '|', detail)
             return newPeers
           }
           return prev
@@ -656,7 +653,6 @@ export function useWebRTC(roomId: string | null) {
     [applyRemoteDisplayName, finalizeReceiveFileTransfer, scheduleReceiveAssemblyRetries]
   )
   const removePeer = useCallback((peerId: string) => {
-    console.log('[WebRTC] Removing peer:', peerId)
     rejectPendingTransferRequestsForPeer(peerId, new Error('对端已断开连接'))
     const peer = peersRef.current.get(peerId)
     if (peer) {
@@ -683,7 +679,6 @@ export function useWebRTC(roomId: string | null) {
       dataChannel.binaryType = 'arraybuffer'
       dataChannel.bufferedAmountLowThreshold = DC_SEND_BUFFER_HIGH_WATER
       dataChannel.onopen = () => {
-        console.log('[DataChannel] Opened with:', peerId)
         const peerInRef = peersRef.current.get(peerId)
         if (peerInRef) {
           peerInRef.dataChannel = dataChannel
@@ -704,7 +699,6 @@ export function useWebRTC(roomId: string | null) {
       }
 
       dataChannel.onclose = () => {
-        console.log('[DataChannel] Closed with:', peerId)
         rejectPendingTransferRequestsForPeer(peerId, new Error('数据通道已关闭'))
         const peerInRef = peersRef.current.get(peerId)
         if (peerInRef) {
@@ -739,7 +733,6 @@ export function useWebRTC(roomId: string | null) {
       // Check if connection already exists
       const existingPeer = peersRef.current.get(peerId)
       if (existingPeer) {
-        console.log('[WebRTC] Connection to', peerId, 'already exists, reusing')
         const dn = peerDisplayNamesRef.current.get(peerId)?.trim()
         if (dn && existingPeer.name !== dn) {
           existingPeer.name = dn
@@ -752,8 +745,6 @@ export function useWebRTC(roomId: string | null) {
         }
         return existingPeer.connection
       }
-
-      console.log('[WebRTC] Creating connection to', peerId, 'isInitiator:', isInitiator)
 
       const pc = new RTCPeerConnection(rtcConfigRef.current)
       const remoteName = peerDisplayNamesRef.current.get(peerId)?.trim()
@@ -775,23 +766,6 @@ export function useWebRTC(roomId: string | null) {
         return updated
       })
 
-      pc.onicecandidateerror = (e) => {
-        const ev = e as RTCPeerConnectionIceErrorEvent
-        const isTurn = typeof ev.url === 'string' && /^(turn|turns):/i.test(ev.url)
-        // console.warn('[WebRTC] ICE candidate error:', peerId, {
-        //   code: ev.errorCode,
-        //   text: ev.errorText,
-        //   url: ev.url,
-        //   address: ev.address,
-        //   port: ev.port
-        // })
-        if (ev.errorCode === 701 && isTurn) {
-          // console.warn('[WebRTC] 701：连不上该 TURN。公网 TURN 常被墙；本地像 PairDrop 一样只配 STUN 即可。需要中继时请自建 coturn 并设置 RTC_CONFIG（见 server/rtc_config.example.json）。')
-        } else if (ev.errorCode === 701 && !isTurn) {
-          // console.warn('[WebRTC] 701：STUN binding 超时（常见于 IPv6 或网络抖动）。已内置多 STUN；若仍慢请检查防火墙/代理或部署 TURN。')
-        }
-      }
-
       // PairDrop sends event.candidate over JSON — use toJSON() so sdpMid / sdpMLineIndex survive socket.io serialization
       pc.onicecandidate = (event) => {
         if (event.candidate && socketRef.current) {
@@ -805,43 +779,22 @@ export function useWebRTC(roomId: string | null) {
                   sdpMLineIndex: c.sdpMLineIndex,
                   usernameFragment: c.usernameFragment
                 }
-          const candidateStr = c.candidate ?? ''
-          const type = candidateStr.includes('typ host') ? 'host' : candidateStr.includes('typ srflx') ? 'srflx' : candidateStr.includes('typ relay') ? 'relay' : 'unknown'
-          const ipMatch = candidateStr.match(/([0-9]{1,3}\.){3}[0-9]{1,3}/)
-          const ip = ipMatch ? ipMatch[0] : 'unknown'
-          if (candidateStr.includes('.local')) {
-            // console.warn(
-            //   '[WebRTC] 发现 mDNS 候选 (.local)。本机双浏览器/多内核时，对端常无法解析该主机名，ICE 会失败。请在 Chrome 打开 chrome://flags 搜索「WebRTC」关闭「隐藏本地 IP」/ mDNS，或两台设备用同一 WiFi + 局域网 IP 访问。'
-            // )
-          }
-          if (candidateLooksLikeTunnelFakeIp(candidateStr)) {
-            // console.warn(
-            //   '[WebRTC] 发现 host 候选落在 198.18.x/198.19.x（多为 Clash / Surge / VPN 的 TUN 或 Fake-IP）。这会导致与对端 127.0.0.1/局域网 host 候选无法配对。请关闭 TUN 模式、改用规则/系统代理、或临时退出代理后再试 WebRTC。'
-            // )
-          }
-          console.log('[WebRTC] Sending ICE candidate to:', peerId, 'type:', type, 'ip:', ip)
           socketRef.current.emit('ice-candidate', {
             targetId: peerId,
             candidate: payload
           })
-        } else if (!event.candidate) {
-          console.log('[WebRTC] ICE gathering complete for:', peerId)
         }
       }
 
       pc.onconnectionstatechange = () => {
-        console.log(`[WebRTC] Connection state with ${peerId}:`, pc.connectionState)
-
         const peerInRef = peersRef.current.get(peerId)
         if (peerInRef) {
           const newStatus = recomputePeerTransferStatus(peerInRef)
           peerInRef.status = newStatus
-          console.log(`[WebRTC] Updated peer ${peerId} status to ${newStatus}, ref size:`, peersRef.current.size)
         }
 
         // Trigger React re-render by creating new Map with current ref values
         setPeers(new Map(peersRef.current))
-        console.log(`[WebRTC] Triggered state update, new Map size:`, peersRef.current.size)
 
         // Clean up failed connections
         if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
@@ -852,26 +805,11 @@ export function useWebRTC(roomId: string | null) {
       }
 
       pc.oniceconnectionstatechange = () => {
-        const s = pc.iceConnectionState
-        console.log(`[WebRTC] ICE state with ${peerId}:`, s)
-        if (s === 'failed') {
-          // console.warn(
-          //   '[WebRTC] ICE 失败常见原因：① 若 host 出现 198.18.x（见上文警告）→ 关掉 Clash/Surge TUN 或 Fake-IP；② 对称 NAT（仅 srflx、无 relay）→ coturn + RTC_CONFIG；③ mDNS（.local）→ Chrome 关闭 WebRTC 隐藏本地 IP；④ 本机测试用 http://127.0.0.1:5173 双标签。'
-          // )
-        }
         const peerInRef = peersRef.current.get(peerId)
         if (peerInRef) {
           peerInRef.status = recomputePeerTransferStatus(peerInRef)
           setPeers(new Map(peersRef.current))
         }
-      }
-
-      pc.onicegatheringstatechange = () => {
-        console.log(`[WebRTC] ICE gathering state with ${peerId}:`, pc.iceGatheringState)
-      }
-
-      pc.onsignalingstatechange = () => {
-        console.log(`[WebRTC] Signaling state with ${peerId}:`, pc.signalingState)
       }
 
       // Data channel handling
@@ -880,18 +818,15 @@ export function useWebRTC(roomId: string | null) {
         const dataChannel = pc.createDataChannel('fileTransfer', {
           ordered: true
         })
-        console.log('[WebRTC] Created data channel for:', peerId, 'readyState:', dataChannel.readyState)
         setupDataChannel(peerId, dataChannel)
         newPeer.dataChannel = dataChannel
       } else {
         pc.ondatachannel = (event) => {
-          console.log('[WebRTC] Received data channel from:', peerId, 'channel:', event.channel.label, 'readyState:', event.channel.readyState)
           setupDataChannel(peerId, event.channel)
           // Update ref then sync to state
           const peerInRef = peersRef.current.get(peerId)
           if (peerInRef) {
             peerInRef.dataChannel = event.channel
-            console.log('[WebRTC] Updated peer in ref with data channel, status:', peerInRef.status)
           }
           setPeers(new Map(peersRef.current))
         }
@@ -899,12 +834,8 @@ export function useWebRTC(roomId: string | null) {
 
       // Create offer if initiator
       if (isInitiator && socketRef.current) {
-        console.log('[WebRTC] Creating offer for:', peerId)
         pc.createOffer()
-          .then((offer) => {
-            console.log('[WebRTC] Setting local description for:', peerId)
-            return pc.setLocalDescription(offer)
-          })
+          .then((offer) => pc.setLocalDescription(offer))
           .then(() => {
             const d = pc.localDescription
             if (!d?.sdp) {
@@ -912,7 +843,6 @@ export function useWebRTC(roomId: string | null) {
               return
             }
             // Trickle ICE: send offer immediately; extra candidates go via onicecandidate
-            console.log('[WebRTC] Emitting offer (trickle) to:', peerId, 'gathering:', pc.iceGatheringState)
             socketRef.current?.emit('offer', {
               targetId: peerId,
               offer: { type: d.type, sdp: d.sdp }
@@ -928,17 +858,14 @@ export function useWebRTC(roomId: string | null) {
 
   const handleOffer = useCallback(
     async (senderId: string, offer: RTCSessionDescriptionInit) => {
-      console.log('[WebRTC] Handling offer from:', senderId)
       const pc = createPeerConnection(senderId, false)
 
       try {
         await pc.setRemoteDescription(offer)
-        console.log('[WebRTC] Set remote description for:', senderId)
 
         // Add any buffered ICE candidates
         const peer = peersRef.current.get(senderId)
         if (peer && peer.iceCandidates.length > 0) {
-          console.log('[WebRTC] Adding', peer.iceCandidates.length, 'buffered ICE candidates for:', senderId)
           for (const candidate of peer.iceCandidates) {
             await pc.addIceCandidate(new RTCIceCandidate(candidate))
           }
@@ -947,7 +874,6 @@ export function useWebRTC(roomId: string | null) {
 
         const earlyPending = pendingIceCandidatesRef.current.get(senderId)
         if (earlyPending && earlyPending.length > 0) {
-          console.log('[WebRTC] Adding', earlyPending.length, 'early trickle ICE candidates for:', senderId)
           for (const candidate of earlyPending) {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(candidate))
@@ -965,7 +891,6 @@ export function useWebRTC(roomId: string | null) {
           console.error('[WebRTC] Missing localDescription after answer for:', senderId)
           return
         }
-        console.log('[WebRTC] Sending answer (trickle) to:', senderId, 'gathering:', pc.iceGatheringState)
         socketRef.current?.emit('answer', {
           targetId: senderId,
           answer: { type: d.type, sdp: d.sdp }
@@ -978,15 +903,12 @@ export function useWebRTC(roomId: string | null) {
   )
 
   const handleAnswer = useCallback(async (senderId: string, answer: RTCSessionDescriptionInit) => {
-    console.log('[WebRTC] Handling answer from:', senderId)
     const peer = peersRef.current.get(senderId)
     if (peer) {
       try {
         await peer.connection.setRemoteDescription(answer)
-        console.log('[WebRTC] Set remote description (answer) for:', senderId)
 
         if (peer.iceCandidates.length > 0) {
-          console.log('[WebRTC] Adding', peer.iceCandidates.length, 'buffered ICE candidates for:', senderId)
           for (const candidate of peer.iceCandidates) {
             await peer.connection.addIceCandidate(new RTCIceCandidate(candidate))
           }
@@ -995,7 +917,6 @@ export function useWebRTC(roomId: string | null) {
 
         const earlyPending = pendingIceCandidatesRef.current.get(senderId)
         if (earlyPending && earlyPending.length > 0) {
-          console.log('[WebRTC] Adding', earlyPending.length, 'early trickle ICE (after answer) for:', senderId)
           for (const candidate of earlyPending) {
             try {
               await peer.connection.addIceCandidate(new RTCIceCandidate(candidate))
@@ -1008,8 +929,6 @@ export function useWebRTC(roomId: string | null) {
       } catch (err) {
         console.error('[WebRTC] Error handling answer:', err)
       }
-    } else {
-      // console.warn('[WebRTC] No peer found for answer from:', senderId)
     }
   }, [])
 
@@ -1019,26 +938,20 @@ export function useWebRTC(roomId: string | null) {
       const list = pendingIceCandidatesRef.current.get(senderId) ?? []
       list.push(candidate)
       pendingIceCandidatesRef.current.set(senderId, list)
-      console.log('[WebRTC] Buffering ICE before peer exists for:', senderId, 'total:', list.length)
       return
     }
     const candidateStr = candidate.candidate || ''
     if (candidateLooksLikeTunnelFakeIp(candidateStr)) {
       console.warn('[WebRTC] 收到对端含 198.18.x/198.19.x 的候选：对端多半开着 Clash/Surge TUN。请双方关闭 TUN 或退出代理后再连。')
     }
-    const type = candidateStr.includes('typ host') ? 'host' : candidateStr.includes('typ srflx') ? 'srflx' : candidateStr.includes('typ relay') ? 'relay' : 'unknown'
-    const ipMatch = candidateStr.match(/([0-9]{1,3}\.){3}[0-9]{1,3}/)
-    const ip = ipMatch ? ipMatch[0] : 'unknown'
 
     if (peer.connection.remoteDescription) {
       try {
         await peer.connection.addIceCandidate(new RTCIceCandidate(candidate))
-        console.log('[WebRTC] Added ICE candidate for:', senderId, 'type:', type, 'ip:', ip)
       } catch (err) {
         console.error('[WebRTC] Error adding ICE candidate:', err)
       }
     } else {
-      console.log('[WebRTC] Buffering ICE candidate for:', senderId, 'type:', type, 'ip:', ip)
       peer.iceCandidates.push(candidate)
     }
   }, [])
@@ -1071,11 +984,9 @@ export function useWebRTC(roomId: string | null) {
 
       newSocket.on('rtc-config', (cfg: unknown) => {
         rtcConfigRef.current = normalizeRtcConfig(cfg)
-        console.log('[WebRTC] rtc-config updated from signaling')
       })
 
       newSocket.on('connect', () => {
-        console.log('[Socket] Connected: socket.id=', newSocket.id, 'emit join-room')
         // 第二参为展示名，旧服务端仅读首参 string 仍可进房
         newSocket.emit('join-room', roomId, getEffectiveDisplayName())
       })
@@ -1083,7 +994,6 @@ export function useWebRTC(roomId: string | null) {
       newSocket.on(
         'joined-room',
         ({
-          roomId: joinedRoomId,
           peerId,
           peerIdHash,
           name,
@@ -1099,7 +1009,6 @@ export function useWebRTC(roomId: string | null) {
           peers: string[]
           peerInfos?: { id: string; displayName?: string; deviceType?: string }[]
         }) => {
-          console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId)
           setSignalingInRoom(true)
           myStablePeerIdRef.current = peerId
           setMyPeerId(peerId)
@@ -1125,11 +1034,9 @@ export function useWebRTC(roomId: string | null) {
           }
 
           if (existingPeers && existingPeers.length > 0) {
-            console.log('[Socket] Connecting to existing peers:', existingPeers)
             existingPeers.forEach((otherPeerId: string) => {
               if (otherPeerId !== peerId) {
                 const shouldInitiate = peerId < otherPeerId
-                console.log(`[Socket] Peer ${otherPeerId}: shouldInitiate=${shouldInitiate} (myId=${peerId})`)
                 if (shouldInitiate) {
                   createPeerConnection(otherPeerId, true)
                 }
@@ -1157,33 +1064,27 @@ export function useWebRTC(roomId: string | null) {
         } else {
           return
         }
-        console.log('[Socket] Peer joined:', joinedPeerId, remoteDisplay ? `name=${remoteDisplay}` : '')
         if (remoteDisplay) applyRemoteDisplayName(joinedPeerId, remoteDisplay)
         if (remoteDeviceSubtitle) applyRemoteDeviceSubtitle(joinedPeerId, remoteDeviceSubtitle)
         const myId = myStablePeerIdRef.current
         if (joinedPeerId === myId) {
-          console.log('[Socket] Ignoring self join')
           return
         }
         const shouldInitiate = myId < joinedPeerId
-        console.log(`[Socket] Peer ${joinedPeerId} joined: shouldInitiate=${shouldInitiate} (myStableId=${myId})`)
         if (shouldInitiate) {
           createPeerConnection(joinedPeerId, true)
         }
       })
 
       newSocket.on('peer-left', (peerId: string) => {
-        console.log('[Socket] Peer left:', peerId)
         removePeer(peerId)
       })
 
       newSocket.on('offer', ({ senderId, offer }) => {
-        console.log('[Socket] Received offer from:', senderId)
         enqueueSignaling(() => handleOffer(senderId, offer))
       })
 
       newSocket.on('answer', ({ senderId, answer }) => {
-        console.log('[Socket] Received answer from:', senderId)
         enqueueSignaling(() => handleAnswer(senderId, answer))
       })
 
@@ -1193,10 +1094,8 @@ export function useWebRTC(roomId: string | null) {
 
       newSocket.on('disconnect', () => {
         if (skipSocketDisconnectStateRef.current) {
-          console.log('[Socket] Disconnected (intentional cleanup)')
           return
         }
-        console.log('[Socket] Disconnected')
         rejectAllPendingTransferRequests(new Error('信令已断开，请稍后重试'))
         setSignalingInRoom(false)
         peersRef.current.forEach((p) => p.connection.close())
@@ -1211,9 +1110,7 @@ export function useWebRTC(roomId: string | null) {
     void (async () => {
       try {
         rtcConfigRef.current = await fetchRtcConfig()
-        console.log('[WebRTC] rtc-config loaded via HTTP')
-      } catch (e) {
-        // console.warn('[WebRTC] rtc-config fetch failed, using default:', e)
+      } catch {
         rtcConfigRef.current = DEFAULT_RTC_CONFIG
       }
       if (cancelled) {
@@ -1227,7 +1124,6 @@ export function useWebRTC(roomId: string | null) {
       cancelled = true
       connectingRef.current = false
       signalingChainRef.current = Promise.resolve()
-      console.log('[Socket] Cleanup - disconnecting')
       skipSocketDisconnectStateRef.current = true
       socketRef.current?.close()
       socketRef.current = null
@@ -1237,7 +1133,6 @@ export function useWebRTC(roomId: string | null) {
   // Separate cleanup effect for component unmount
   useEffect(() => {
     return () => {
-      console.log('[WebRTC] Component unmounting, cleaning up')
       connectingRef.current = false
       // 后声明的 effect 先清理：若此处只把 ref 置空而不 close，roomId effect 的 cleanup 将无法关闭信令连接
       skipSocketDisconnectStateRef.current = true
@@ -1245,15 +1140,17 @@ export function useWebRTC(roomId: string | null) {
       socketRef.current = null
       const peerMap = peersRef.current
       const pendingMap = pendingIceCandidatesRef.current
+      const timersMap = receiveAssembleTimersRef.current
+      const orphanMap = orphanChunksRef.current
       const peersSnapshot = new Map(peerMap)
       peersSnapshot.forEach((peer) => {
         peer.connection.close()
       })
       peerMap.clear()
       pendingMap.clear()
-      receiveAssembleTimersRef.current.forEach((tid) => clearTimeout(tid))
-      receiveAssembleTimersRef.current.clear()
-      orphanChunksRef.current.clear()
+      timersMap.forEach((tid) => clearTimeout(tid))
+      timersMap.clear()
+      orphanMap.clear()
     }
   }, [])
 
@@ -1393,12 +1290,6 @@ export function useWebRTC(roomId: string | null) {
 
   const sendFilesBatch = useCallback(
     async (files: File[], targetPeerId: string) => {
-      console.log('[WebRTC] sendFilesBatch 待发送文件列表', {
-        targetPeerId,
-        count: files.length,
-        files: files.map(describeFileForLog)
-      })
-
       const peer = peersRef.current.get(targetPeerId)
       if (!peer || peer.status !== 'connected' || peer.dataChannel?.readyState !== 'open') {
         throw new Error('Peer not connected')
@@ -1478,7 +1369,6 @@ export function useWebRTC(roomId: string | null) {
   }, [])
 
   const downloadFile = useCallback((file: ReceivedFile) => {
-    console.log('[WebRTC] downloadFile:', file)
     try {
       triggerBrowserDownload(file.blob, file.name)
     } catch (e) {

@@ -1,7 +1,3 @@
-import dayjs from 'dayjs'
-
-import { DropReceiveFileItem } from './app-drop-protocol'
-
 /** 原生回调：入参为原生回传的任意 JSON/字符串等 */
 export type JSBridgeCallback = (data?: unknown) => void
 
@@ -62,22 +58,17 @@ class JsBridge {
    * 设置WKWebViewJavascriptBridge
    */
   private setupBridge(): void {
-    console.log('[JsBridge] 开始设置 JsBridge')
-
     if (this.window.WebViewJavascriptBridge) {
-      console.log('[JsBridge] WebViewJavascriptBridge 已存在，直接初始化')
       this.initBridge()
       return
     }
 
     if (this.window.WVJBCallbacks) {
-      console.log('[JsBridge] WVJBCallbacks 已存在，添加回调')
       this.window.WVJBCallbacks.push(() => this.initBridge())
       this.startBridgePoll()
       return
     }
 
-    console.log('[JsBridge] 创建 WVJBCallbacks 并触发 bridge 加载')
     this.window.WVJBCallbacks = [() => this.initBridge()]
 
     // 创建iframe触发bridge初始化
@@ -102,7 +93,6 @@ class JsBridge {
         return
       }
       if (this.window.WebViewJavascriptBridge) {
-        console.log('[JsBridge] 轮询检测到 WebViewJavascriptBridge 已注入')
         this.clearBridgePoll()
         this.initBridge()
         return
@@ -132,12 +122,9 @@ class JsBridge {
    * iOS WK 通常无 init；Android（如 lzyzsd）需调用 init 才能建立 Native→JS 通道，有则调用不影响其他宿主
    */
   private initBridge(): void {
-    console.log('[JsBridge] 初始化 bridge')
     this.clearBridgePoll()
 
     if (this.window.WebViewJavascriptBridge) {
-      console.log('[JsBridge] WebViewJavascriptBridge 可用，设置为就绪状态')
-
       // 包装原生的 registerHandler，拦截直接调用（如 iframe 通过 window.parent 访问）
       this.wrapNativeRegisterHandler()
 
@@ -150,10 +137,8 @@ class JsBridge {
       }
 
       this.isReady = true
-      const callbackCount = this.readyCallbacks.length
       this.readyCallbacks.forEach((callback) => callback())
       this.readyCallbacks = []
-      console.log(`[JsBridge] Bridge 初始化完成，执行了 ${callbackCount} 个回调`)
     } else {
       console.warn('[JsBridge] WebViewJavascriptBridge 不可用')
     }
@@ -171,8 +156,6 @@ class JsBridge {
 
     // 替换为包装后的方法
     bridge.registerHandler = (handlerName: string, handler: JSBridgeHandler) => {
-      console.log(`[JsBridge] 拦截 registerHandler: ${handlerName}`)
-
       // 将 handler 添加到 Map 中
       if (!this.handlersMap.has(handlerName)) {
         this.handlersMap.set(handlerName, new Set())
@@ -183,10 +166,7 @@ class JsBridge {
       if (!this.registeredToNative.has(handlerName)) {
         this.registeredToNative.add(handlerName)
         originalRegisterHandler(handlerName, (data: unknown, callback?: JSBridgeCallback) => {
-          const logData = handlerName === 'dropReceiveFile' ? this.omitBase64ForLog(data) : data
-          console.log(`[JsBridge] 收到原生调用 ${handlerName}，${dayjs().format('mm:ss.SSS')} 分发给 ${this.handlersMap.get(handlerName)?.size || 0} 个 handler`, logData)
           const handlers = this.handlersMap.get(handlerName)
-          console.log('handlers', handlerName, handlers?.size)
           if (handlers) {
             handlers.forEach((h) => {
               try {
@@ -239,62 +219,20 @@ class JsBridge {
   }
 
   /**
-   * 辅助方法：深拷贝数据并省略 base64 数据，用于打印日志
-   */
-  private omitBase64ForLog(data: unknown): unknown {
-    if (!data) return data
-    try {
-      const cloned = JSON.parse(JSON.stringify(data))
-      if (cloned && typeof cloned === 'object') {
-        if (Array.isArray(cloned.items)) {
-          cloned.items.forEach((item: DropReceiveFileItem) => {
-            if (item.data) item.data = '[BASE64_DATA_OMITTED]'
-            if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
-            if (item.cover) item.cover = '[COVER_OMITTED]'
-          })
-        } else if (Array.isArray(cloned.files)) {
-          cloned.files.forEach((item: DropReceiveFileItem) => {
-            if (item.data) item.data = '[BASE64_DATA_OMITTED]'
-            if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
-            if (item.cover) item.cover = '[COVER_OMITTED]'
-          })
-        } else if (cloned.file) {
-          if (cloned.file.data) cloned.file.data = '[BASE64_DATA_OMITTED]'
-          if (cloned.file.base64) cloned.file.base64 = '[BASE64_DATA_OMITTED]'
-          if (cloned.file.cover) cloned.file.cover = '[COVER_OMITTED]'
-        } else {
-          if (cloned.data) cloned.data = '[BASE64_DATA_OMITTED]'
-          if (cloned.base64) cloned.base64 = '[BASE64_DATA_OMITTED]'
-          if (cloned.cover) cloned.cover = '[COVER_OMITTED]'
-        }
-      }
-      return cloned
-    } catch {
-      return data
-    }
-  }
-
-  /**
    * 调用iOS原生方法
    * @param handlerName 处理器名称
    * @param data 数据
    * @param callback 回调函数
    */
   callHandler(handlerName: string, data?: unknown, callback?: JSBridgeCallback): void {
-    const logData = ['dropLoadComplete', 'dropSelectFile', 'dropFileFlow', 'dropSaveFile'].includes(handlerName) ? this.omitBase64ForLog(data) : data
-    console.log(`[JsBridge] 调用处理器: ${handlerName}`, logData)
-
     if (!this.isNativeEmbedHost()) {
-      console.warn('[JsBridge] 非 WebView 宿主环境，跳过 callHandler:', handlerName)
       callback?.({ error: 'Not in WebView environment' })
       return
     }
 
     this.waitForReady(() => {
       if (this.window.WebViewJavascriptBridge) {
-        console.log(`[JsBridge] 执行 callHandler: ${handlerName}`)
         this.window.WebViewJavascriptBridge.callHandler(handlerName, data, (response: unknown) => {
-          console.log(`[JsBridge] 收到响应 ${handlerName}:`, response)
           callback?.(response)
         })
       } else {
@@ -312,7 +250,6 @@ class JsBridge {
    */
   registerHandler(handlerName: string, handler: JSBridgeHandler): void {
     if (!this.isNativeEmbedHost()) {
-      console.debug('[JsBridge] 非 WebView 宿主，跳过 registerHandler:', handlerName)
       return
     }
     this.waitForReady(() => {

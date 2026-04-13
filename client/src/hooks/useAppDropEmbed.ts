@@ -84,7 +84,6 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
       void (async () => {
         try {
           const files = await filesFromDropReceivePayload(data)
-          console.log('[AppDrop] dropReceiveFile', files)
           if (files.length === 0) {
             callback?.({ ok: true, count: 0 })
             return

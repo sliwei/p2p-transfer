@@ -16,7 +16,9 @@ import { buildRoomShareUrl } from './utils/roomLink'
 function App() {
   const { roomId, inputRoomId, setInputRoomId, joinRoom, generateRoomId } = useRoom()
   const roomIdRef = useRef(roomId)
-  roomIdRef.current = roomId
+  useEffect(() => {
+    roomIdRef.current = roomId
+  }, [roomId])
 
   const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, outgoingTransferHint, respondToTransferRequest, downloadFile, myPeerId, myPeerName } = useWebRTC(roomId)
 
@@ -24,36 +26,32 @@ function App() {
 
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
 
+  const readyPeerIds = useMemo(() => new Set(readyPeers.map((p) => p.id)), [readyPeers])
+
   const [selectedPeers, setSelectedPeers] = useState<string[]>([])
+
+  /** 与就绪列表求交：对端掉线后 UI 与发送目标自动忽略已断连 id，无需 effect 回写 state */
+  const selectedPeersEffective = useMemo(
+    () => selectedPeers.filter((id) => readyPeerIds.has(id)),
+    [selectedPeers, readyPeerIds]
+  )
 
   const handleTogglePeer = useCallback((peerId: string) => {
     setSelectedPeers((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]))
   }, [])
 
-  useEffect(() => {
-    // Remove selected peers that are no longer ready
-    setSelectedPeers((prev) => {
-      const filtered = prev.filter((id) => readyPeers.some((p) => p.id === id))
-      // Only set state if the array actually changed to avoid infinite loops
-      if (filtered.length !== prev.length) {
-        return filtered
-      }
-      return prev
-    })
-  }, [readyPeers])
-
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [isSending, setIsSending] = useState(false)
 
-  /** 仅当对端从就绪列表消失时兜底结束「发送中」（不因用户手动取消勾选清空 selectedPeers 而误清，否则会与仍在等待确认的 send 不同步） */
+  /** 仅当对端从就绪列表消失时兜底结束「发送中」；用户手动清空勾选时不触发（见下方 selectedPeers.length 判断）。异步写入以避免 react-hooks/set-state-in-effect。 */
   useEffect(() => {
     if (!isSending) return
     if (selectedPeers.length === 0) return
-    const anyStillReady = selectedPeers.some((id) => readyPeers.some((p) => p.id === id))
-    if (!anyStillReady) {
-      setIsSending(false)
-    }
-  }, [isSending, selectedPeers, readyPeers])
+    const anyStillReady = selectedPeers.some((id) => readyPeerIds.has(id))
+    if (anyStillReady) return
+    const id = requestAnimationFrame(() => setIsSending(false))
+    return () => cancelAnimationFrame(id)
+  }, [isSending, selectedPeers, readyPeerIds])
 
   const [showReceivedModal, setShowReceivedModal] = useState(false)
   const prevReceivingCountRef = useRef(0)
@@ -102,25 +100,16 @@ function App() {
     }
   }, [transfers, receivedFiles])
   const handleSendFiles = async () => {
-    if (selectedFiles.length === 0 || selectedPeers.length === 0 || isSending) return
+    if (selectedFiles.length === 0 || selectedPeersEffective.length === 0 || isSending) return
 
     setIsSending(true)
-    try {
-      // Send files to all selected peers concurrently
-      await Promise.allSettled(
-        selectedPeers.map(async (peerId) => {
-          await sendFilesBatch(selectedFiles, peerId)
-        })
-      )
-      // Keep files selected or clear them? Usually clear after send.
-      // setSelectedFiles([])
-      setSelectedPeers([])
-    } catch (error) {
-      // console.error('Error sending files:', error)
-      // alert('Failed to send files. Please check peer connections or user rejected.')
-    } finally {
-      setIsSending(false)
-    }
+    await Promise.allSettled(
+      selectedPeersEffective.map(async (peerId) => {
+        await sendFilesBatch(selectedFiles, peerId)
+      })
+    )
+    setSelectedPeers([])
+    setIsSending(false)
   }
 
   if (!roomId) {
@@ -162,7 +151,7 @@ function App() {
             onFilesChange={handleDropZoneFilesChange}
             onSelectMore={notifySelectFile}
             onSendFiles={handleSendFiles}
-            canSend={selectedPeers.length > 0}
+            canSend={selectedPeersEffective.length > 0}
             isSending={isSending}
           />
         </div>
@@ -170,7 +159,7 @@ function App() {
         <div className="flex-1 pointer-events-auto">
           <RadarView
             peers={readyPeers}
-            selectedPeers={selectedPeers}
+            selectedPeers={selectedPeersEffective}
             onTogglePeer={handleTogglePeer}
             transfers={transfers}
             outgoingTransferHint={outgoingTransferHint}

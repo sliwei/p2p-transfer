@@ -28,6 +28,11 @@ function deviceNameFromUserAgent(uaHeader) {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const DEBUG_SIGNALING = process.env.DEBUG_SIGNALING === '1';
+const slog = (...args) => {
+  if (DEBUG_SIGNALING) console.log(...args);
+};
+
 /**
  * 与 mb-pairdrop server/peer.js 同源思路：会话级 UUID + peerIdHash 校验，重连后 peerId 不变，便于后续断点续传。
  * 生产环境请设置 PEER_ID_SECRET，否则重启后旧 hash 全部失效。
@@ -55,7 +60,7 @@ function loadRtcConfig() {
     try {
       const raw = fs.readFileSync(process.env.RTC_CONFIG, 'utf8');
       const cfg = JSON.parse(raw);
-      console.log('[Server] RTC config loaded from', process.env.RTC_CONFIG);
+      slog('[Server] RTC config loaded from', process.env.RTC_CONFIG);
       return cfg;
     } catch (e) {
       console.error('[Server] Failed to read RTC_CONFIG, using defaults:', e.message);
@@ -150,7 +155,7 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   const stablePeerId = socket.data.stablePeerId;
-  console.log(`[Server] Client connected: socket=${socket.id} stablePeerId=${stablePeerId}`);
+  slog(`[Server] Client connected: socket=${socket.id} stablePeerId=${stablePeerId}`);
   socket.emit('rtc-config', rtcConfig);
 
   // Join room（roomId 字符串 + 可选第二参 displayName，或对象体）
@@ -188,7 +193,7 @@ io.on('connection', (socket) => {
       deviceName: socket.data.deviceName || 'Unknown Device',
     });
 
-    console.log(`[Server] ${stablePeerId} (socket ${socket.id}) joined room: ${roomId}`);
+    slog(`[Server] ${stablePeerId} (socket ${socket.id}) joined room: ${roomId}`);
 
     const roomMap = rooms.get(roomId);
     const peers = [];
@@ -203,7 +208,7 @@ io.on('connection', (socket) => {
       });
     }
 
-    console.log(`[Server] Room ${roomId} peers:`, peers);
+    slog(`[Server] Room ${roomId} peers:`, peers);
 
     socket.emit('joined-room', {
       roomId,
@@ -244,13 +249,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log(`[Server] Client disconnected: socket=${socket.id} stablePeerId=${stablePeerId}`);
+    slog(`[Server] Client disconnected: socket=${socket.id} stablePeerId=${stablePeerId}`);
 
     rooms.forEach((roomMap, roomId) => {
       if (roomMap.has(stablePeerId)) {
         roomMap.delete(stablePeerId);
         socket.to(roomId).emit('peer-left', stablePeerId);
-        console.log(`[Server] Notified room ${roomId} that ${stablePeerId} left`);
+        slog(`[Server] Notified room ${roomId} that ${stablePeerId} left`);
         if (roomMap.size === 0) {
           rooms.delete(roomId);
         }
@@ -268,7 +273,7 @@ if (clientDist && fs.existsSync(clientDist)) {
     if (!fs.existsSync(indexHtml)) return next();
     res.sendFile(indexHtml);
   });
-  console.log('[Server] Serving static from', clientDist);
+  slog('[Server] Serving static from', clientDist);
 }
 
 const PORT = process.env.PORT || 3001;

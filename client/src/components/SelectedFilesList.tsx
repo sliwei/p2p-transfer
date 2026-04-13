@@ -46,7 +46,6 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   )
 
   const handleSelectClick = () => {
-    console.log('handleSelectClick', jsBridge.isNativeEmbedHost())
     if (jsBridge.isNativeEmbedHost()) {
       onSelectMore()
     } else {

@@ -153,48 +153,6 @@ export function stripDataUrlToBase64(dataUrl: string): string {
   return i >= 0 ? dataUrl.slice(i + 1) : dataUrl
 }
 
-/** 日志用：长 data URL / base64 串省略为长度说明，其余字段原样 */
-function omitLongPayloadForLog(value: string, field: string): string {
-  const n = value.length
-  if (value.startsWith('data:')) {
-    return `[${field}: data URL omitted, length=${n}]`
-  }
-  if (n > 80 && /^[A-Za-z0-9+/=\s]+$/.test(value)) {
-    return `[${field}: base64 omitted, length=${n}]`
-  }
-  if (n > 500) {
-    return `[${field}: string truncated, length=${n}, head=${value.slice(0, 48)}…]`
-  }
-  return value
-}
-
-/**
- * 将 File（含 drop 协议挂的 cover 等自有字段）转为可 console 的对象，base64/长 payload 省略。
- */
-export function describeFileForLog(file: File): Record<string, unknown> {
-  const std = ['name', 'size', 'type', 'lastModified'] as const
-  const out: Record<string, unknown> = {
-    name: file.name,
-    size: file.size,
-    type: file.type,
-    lastModified: file.lastModified,
-  }
-  const wrp = (file as File & { webkitRelativePath?: string }).webkitRelativePath
-  if (wrp) out.webkitRelativePath = wrp
-
-  const extra = file as File & Record<string, unknown>
-  for (const key of Object.keys(extra)) {
-    if (std.includes(key as (typeof std)[number]) || key === 'webkitRelativePath') continue
-    const v = extra[key]
-    if (typeof v === 'string') {
-      out[key] = omitLongPayloadForLog(v, key)
-    } else {
-      out[key] = v
-    }
-  }
-  return out
-}
-
 /** 协议中的 cover 转为可用于图片 src 的地址（data URL / 绝对 URL 原样返回；否则按 base64 + MIME 包装） */
 export function coverToImageSrc(cover: string, file: File): string {
   const c = cover.trim()
