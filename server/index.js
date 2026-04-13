@@ -6,6 +6,25 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import parser from 'ua-parser-js';
+
+/** 与 mb-pairdrop server/peer.js _setName 中 deviceName 一致（用于雷达卡片副标题，对应 PairDrop 的 .device-name） */
+function deviceNameFromUserAgent(uaHeader) {
+  const ua = parser(typeof uaHeader === 'string' ? uaHeader : '');
+  let deviceName = '';
+  if (ua.os && ua.os.name) {
+    deviceName = ua.os.name.replace('Mac OS', 'Mac') + ' ';
+  }
+  if (ua.device && ua.device.model) {
+    deviceName += ua.device.model;
+  } else if (ua.browser && ua.browser.name) {
+    deviceName += ua.browser.name;
+  }
+  if (!deviceName.trim()) {
+    deviceName = 'Unknown Device';
+  }
+  return deviceName.trim();
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,8 +94,31 @@ const io = new Server(httpServer, {
   pingInterval: 25000
 });
 
-// Room management：存稳定 peerId（UUID），与 socket.id 解耦
-const rooms = new Map(); // roomId -> Set<stablePeerId>
+// Room management：roomId -> Map<stablePeerId, { displayName, deviceName }>（deviceName 由 UA 解析，同 PairDrop）
+const rooms = new Map();
+
+/** 首参 string 兼容旧客户端；第二参为地址栏展示名；或单参 { roomId, displayName } */
+function parseJoinRoomPayload(payload, displayNameArg) {
+  if (typeof payload === 'string') {
+    const roomId = payload.trim();
+    if (!roomId) return null;
+    const displayName =
+      typeof displayNameArg === 'string' ? displayNameArg.trim().slice(0, 64) : '';
+    return { roomId, displayName };
+  }
+  if (payload && typeof payload === 'object' && typeof payload.roomId === 'string') {
+    const roomId = payload.roomId.trim();
+    if (!roomId) return null;
+    let displayName = '';
+    if (typeof payload.displayName === 'string') {
+      displayName = payload.displayName.trim().slice(0, 64);
+    } else if (typeof displayNameArg === 'string') {
+      displayName = displayNameArg.trim().slice(0, 64);
+    }
+    return { roomId, displayName };
+  }
+  return null;
+}
 
 io.use((socket, next) => {
   try {
@@ -98,6 +140,7 @@ io.use((socket, next) => {
 
     socket.data.stablePeerId = stablePeerId;
     socket.data.peerIdHash = hashPeerId(stablePeerId);
+    socket.data.deviceName = deviceNameFromUserAgent(socket.handshake.headers['user-agent']);
     socket.join(`peer:${stablePeerId}`);
     next();
   } catch (e) {
@@ -110,12 +153,14 @@ io.on('connection', (socket) => {
   console.log(`[Server] Client connected: socket=${socket.id} stablePeerId=${stablePeerId}`);
   socket.emit('rtc-config', rtcConfig);
 
-  // Join room
-  socket.on('join-room', (roomId) => {
-    if (!roomId || typeof roomId !== 'string') {
+  // Join room（roomId 字符串 + 可选第二参 displayName，或对象体）
+  socket.on('join-room', (payload, displayNameArg) => {
+    const parsed = parseJoinRoomPayload(payload, displayNameArg);
+    if (!parsed) {
       socket.emit('error', 'Invalid room ID');
       return;
     }
+    const { roomId, displayName } = parsed;
 
     // 离开其它业务房间，保留 socket 自带 id 房间与 peer:<uuid> 私有信令房间（避免迭代中修改 Set）
     const roomsToLeave = [...socket.rooms].filter(
@@ -124,8 +169,9 @@ io.on('connection', (socket) => {
     for (const room of roomsToLeave) {
       socket.leave(room);
       if (rooms.has(room)) {
-        rooms.get(room).delete(stablePeerId);
-        if (rooms.get(room).size === 0) {
+        const roomMap = rooms.get(room);
+        roomMap.delete(stablePeerId);
+        if (roomMap.size === 0) {
           rooms.delete(room);
         }
       }
@@ -135,14 +181,27 @@ io.on('connection', (socket) => {
     socket.join(roomId);
 
     if (!rooms.has(roomId)) {
-      rooms.set(roomId, new Set());
+      rooms.set(roomId, new Map());
     }
-    rooms.get(roomId).add(stablePeerId);
+    rooms.get(roomId).set(stablePeerId, {
+      displayName,
+      deviceName: socket.data.deviceName || 'Unknown Device',
+    });
 
     console.log(`[Server] ${stablePeerId} (socket ${socket.id}) joined room: ${roomId}`);
 
-    const peerSet = rooms.get(roomId);
-    const peers = peerSet ? Array.from(peerSet).filter((id) => id !== stablePeerId) : [];
+    const roomMap = rooms.get(roomId);
+    const peers = [];
+    const peerInfos = [];
+    for (const [id, meta] of roomMap) {
+      if (id === stablePeerId) continue;
+      peers.push(id);
+      peerInfos.push({
+        id,
+        displayName: meta.displayName || '',
+        deviceType: meta.deviceName || '',
+      });
+    }
 
     console.log(`[Server] Room ${roomId} peers:`, peers);
 
@@ -150,10 +209,17 @@ io.on('connection', (socket) => {
       roomId,
       peerId: stablePeerId,
       peerIdHash: socket.data.peerIdHash,
+      deviceType: socket.data.deviceName || '',
       peers,
+      peerInfos,
     });
 
-    socket.to(roomId).emit('peer-joined', stablePeerId);
+    // 单对象避免多参数在部分链路下丢失第二参；旧客户端若只认 string 需同步升级
+    socket.to(roomId).emit('peer-joined', {
+      peerId: stablePeerId,
+      displayName: displayName || '',
+      deviceType: socket.data.deviceName || '',
+    });
   });
 
   socket.on('offer', ({ targetId, offer }) => {
@@ -180,12 +246,12 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`[Server] Client disconnected: socket=${socket.id} stablePeerId=${stablePeerId}`);
 
-    rooms.forEach((peerSet, roomId) => {
-      if (peerSet.has(stablePeerId)) {
-        peerSet.delete(stablePeerId);
+    rooms.forEach((roomMap, roomId) => {
+      if (roomMap.has(stablePeerId)) {
+        roomMap.delete(stablePeerId);
         socket.to(roomId).emit('peer-left', stablePeerId);
         console.log(`[Server] Notified room ${roomId} that ${stablePeerId} left`);
-        if (peerSet.size === 0) {
+        if (roomMap.size === 0) {
           rooms.delete(roomId);
         }
       }

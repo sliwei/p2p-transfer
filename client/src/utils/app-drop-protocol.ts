@@ -39,26 +39,41 @@ export interface DropReceiveFileItem {
   url?: string
   path?: string
   messageId?: string
+  /** 封面图：非空时列表预览优先用（data URL / http(s) / 纯 base64 均可） */
+  cover?: string
 }
 
-function itemToFile(item: DropReceiveFileItem): Promise<File> {
+/** 带可选 cover 的 File（dropReceiveFile 协议解析结果） */
+export type DropReceiveFile = File & { cover?: string }
+
+function attachCover(file: File, item: DropReceiveFileItem): DropReceiveFile {
+  const raw = item.cover
+  if (raw == null) return file as DropReceiveFile
+  const cover = typeof raw === 'string' ? raw.trim() : ''
+  if (!cover) return file as DropReceiveFile
+  return Object.assign(file, { cover }) as DropReceiveFile
+}
+
+function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
   const name = item.name ?? item.fileName ?? 'file'
   const mime = item.mime ?? item.type ?? item.mimeType ?? 'application/octet-stream'
 
   if (item.data && typeof item.data === 'string') {
-    // eslint-disable-next-line @typescript-eslint/no-use-before-define
+     
     const base64 = stripDataUrlToBase64(item.data)
     const blob = base64ToBlob(base64, mime)
-    return Promise.resolve(new File([blob], name, { type: mime }))
+    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
   }
 
   if (item.base64 && typeof item.base64 === 'string') {
     const blob = base64ToBlob(item.base64, mime)
-    return Promise.resolve(new File([blob], name, { type: mime }))
+    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
   }
 
   if (item.url && typeof item.url === 'string') {
-    return urlToBlob(item.url).then((blob) => new File([blob], name, { type: item.type || blob.type || mime }))
+    return urlToBlob(item.url).then((blob) =>
+      attachCover(new File([blob], name, { type: item.type || blob.type || mime }), item)
+    )
   }
 
   return Promise.reject(new Error(`dropReceiveFile: 无法解析文件项（需 data, base64 或 url）: ${name}`))
@@ -73,7 +88,7 @@ function itemToFile(item: DropReceiveFileItem): Promise<File> {
  * - `{ files: [ { ... }, ... ] }`
  * - `{ name, base64, type? }` 单文件
  */
-export async function filesFromDropReceivePayload(data: unknown): Promise<File[]> {
+export async function filesFromDropReceivePayload(data: unknown): Promise<DropReceiveFile[]> {
   if (data == null) return []
 
   if (typeof data === 'string') {
@@ -136,4 +151,57 @@ export function blobToBase64DataUrl(blob: Blob): Promise<string> {
 export function stripDataUrlToBase64(dataUrl: string): string {
   const i = dataUrl.indexOf(',')
   return i >= 0 ? dataUrl.slice(i + 1) : dataUrl
+}
+
+/** 日志用：长 data URL / base64 串省略为长度说明，其余字段原样 */
+function omitLongPayloadForLog(value: string, field: string): string {
+  const n = value.length
+  if (value.startsWith('data:')) {
+    return `[${field}: data URL omitted, length=${n}]`
+  }
+  if (n > 80 && /^[A-Za-z0-9+/=\s]+$/.test(value)) {
+    return `[${field}: base64 omitted, length=${n}]`
+  }
+  if (n > 500) {
+    return `[${field}: string truncated, length=${n}, head=${value.slice(0, 48)}…]`
+  }
+  return value
+}
+
+/**
+ * 将 File（含 drop 协议挂的 cover 等自有字段）转为可 console 的对象，base64/长 payload 省略。
+ */
+export function describeFileForLog(file: File): Record<string, unknown> {
+  const std = ['name', 'size', 'type', 'lastModified'] as const
+  const out: Record<string, unknown> = {
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    lastModified: file.lastModified,
+  }
+  const wrp = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  if (wrp) out.webkitRelativePath = wrp
+
+  const extra = file as File & Record<string, unknown>
+  for (const key of Object.keys(extra)) {
+    if (std.includes(key as (typeof std)[number]) || key === 'webkitRelativePath') continue
+    const v = extra[key]
+    if (typeof v === 'string') {
+      out[key] = omitLongPayloadForLog(v, key)
+    } else {
+      out[key] = v
+    }
+  }
+  return out
+}
+
+/** 协议中的 cover 转为可用于图片 src 的地址（data URL / 绝对 URL 原样返回；否则按 base64 + MIME 包装） */
+export function coverToImageSrc(cover: string, file: File): string {
+  const c = cover.trim()
+  if (!c) return ''
+  if (c.startsWith('data:') || c.startsWith('http://') || c.startsWith('https://') || c.startsWith('blob:')) {
+    return c
+  }
+  const mime = file.type && file.type.startsWith('image/') ? file.type : 'image/jpeg'
+  return `data:${mime};base64,${c}`
 }

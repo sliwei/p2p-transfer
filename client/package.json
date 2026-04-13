@@ -13,12 +13,14 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
+    "cute-nickname": "^1.0.9",
     "dayjs": "^1.11.20",
     "eruda": "^3.4.3",
     "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "socket.io-client": "^4.7.4"
+    "socket.io-client": "^4.7.4",
+    "sonner": "^2.0.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

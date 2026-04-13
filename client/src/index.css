@@ -6,10 +6,8 @@
   html,
   body,
   #root {
-    @apply h-full antialiased;
-  }
-
-  body {
-    @apply bg-surface font-sans text-content leading-normal;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 }

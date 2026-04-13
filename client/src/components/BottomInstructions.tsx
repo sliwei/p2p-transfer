@@ -1,17 +1,37 @@
 import { QRCodeSVG } from 'qrcode.react'
+import { useCallback } from 'react'
+import { toast } from 'sonner'
+
+import { copyToClipboard } from '../utils/copyToClipboard'
 
 interface BottomInstructionsProps {
   roomLink: string
 }
 
 export const BottomInstructions: React.FC<BottomInstructionsProps> = ({ roomLink }) => {
+  const handleCopyLink = useCallback(async () => {
+    const ok = await copyToClipboard(roomLink)
+    if (ok) {
+      toast.success('复制成功')
+    } else {
+      toast.error('复制失败')
+    }
+  }, [roomLink])
+
   return (
-    <div className="w-full px-4 py-6 flex gap-4 items-start">
+    <div className="w-full px-2 py-2 flex gap-4 items-start">
       <div className="flex flex-col items-center shrink-0">
         <div className="w-24 h-24 bg-white p-1 rounded-lg border border-[#E5E5E5] flex items-center justify-center">
           <QRCodeSVG value={roomLink} size={88} />
         </div>
         <span className="text-[12px] text-[#999999] mt-2">maliang.com</span>
+        <button
+          type="button"
+          onClick={handleCopyLink}
+          className="mt-2 px-3 py-1 bg-[#0066FF] text-white text-[12px] font-medium rounded-full transition-colors hover:bg-[#0052CC] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          一键复制
+        </button>
       </div>
 
       <div className="flex flex-col gap-4">

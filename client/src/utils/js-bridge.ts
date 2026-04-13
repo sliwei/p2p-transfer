@@ -250,18 +250,22 @@ class JsBridge {
           cloned.items.forEach((item: DropReceiveFileItem) => {
             if (item.data) item.data = '[BASE64_DATA_OMITTED]'
             if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
+            if (item.cover) item.cover = '[COVER_OMITTED]'
           })
         } else if (Array.isArray(cloned.files)) {
           cloned.files.forEach((item: DropReceiveFileItem) => {
             if (item.data) item.data = '[BASE64_DATA_OMITTED]'
             if (item.base64) item.base64 = '[BASE64_DATA_OMITTED]'
+            if (item.cover) item.cover = '[COVER_OMITTED]'
           })
         } else if (cloned.file) {
           if (cloned.file.data) cloned.file.data = '[BASE64_DATA_OMITTED]'
           if (cloned.file.base64) cloned.file.base64 = '[BASE64_DATA_OMITTED]'
+          if (cloned.file.cover) cloned.file.cover = '[COVER_OMITTED]'
         } else {
           if (cloned.data) cloned.data = '[BASE64_DATA_OMITTED]'
           if (cloned.base64) cloned.base64 = '[BASE64_DATA_OMITTED]'
+          if (cloned.cover) cloned.cover = '[COVER_OMITTED]'
         }
       }
       return cloned

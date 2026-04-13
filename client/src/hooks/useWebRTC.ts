@@ -1,5 +1,8 @@
+import { generateCuteNickname } from 'cute-nickname'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { io, Socket } from 'socket.io-client';
+import { io, Socket } from 'socket.io-client'
+
+import { describeFileForLog } from '../utils/app-drop-protocol'
 
 /** 本机开发：信令与 rtc-config 统一走 127.0.0.1:3001（IPv4），避免 localhost 解析到 ::1 与 WebRTC 的 127.0.0.1 host 候选混用；并与仅用「局域网 IP 打开页面」时的行为区分。 */
 function getSignalingOrigin(): string {
@@ -8,6 +11,60 @@ function getSignalingOrigin(): string {
     return 'http://127.0.0.1:3001';
   }
   return '';
+}
+
+/**
+ * 与 `?roomid=…&name=…` 一致：从查询串读取展示名（已按 URL 规则解码，含中文）。
+ * 同时支持 hash 内查询串，如 `/#/?name=…`。
+ */
+export function readDisplayNameFromUrl(): string {
+  try {
+    const fromSearch = (q: string) => {
+      const s = q.startsWith('?') ? q : q ? `?${q}` : '';
+      if (!s) return '';
+      const raw = new URLSearchParams(s).get('name');
+      if (raw == null) return '';
+      return raw.trim();
+    };
+    const a = fromSearch(window.location.search);
+    if (a) return a;
+    const hash = window.location.hash;
+    const qi = hash.indexOf('?');
+    if (qi >= 0) {
+      const b = fromSearch(hash.slice(qi));
+      if (b) return b;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+const SESSION_RANDOM_CN_NICKNAME_KEY = 'p2p_transfer_session_cn_nickname';
+
+/**
+ * 展示名：地址栏 `name` 优先；否则会话内固定一条 cute-nickname 生成的中文昵称（刷新不丢，关标签后重开再生成）
+ */
+export function getEffectiveDisplayName(): string {
+  const fromUrl = readDisplayNameFromUrl().trim().slice(0, 64);
+  if (fromUrl) return fromUrl;
+  try {
+    const cached = sessionStorage.getItem(SESSION_RANDOM_CN_NICKNAME_KEY)?.trim();
+    if (cached) return cached.slice(0, 64);
+  } catch {
+    /* ignore */
+  }
+  let created = generateCuteNickname({ withEmoji: false });
+  created = created.trim().slice(0, 64);
+  if (!created) {
+    created = '访客';
+  }
+  try {
+    sessionStorage.setItem(SESSION_RANDOM_CN_NICKNAME_KEY, created);
+  } catch {
+    /* ignore */
+  }
+  return created;
 }
 
 const SIGNALING_SERVER = getSignalingOrigin();
@@ -71,6 +128,10 @@ async function fetchRtcConfig(): Promise<RTCConfiguration> {
  * 256KB 分片易触发 OperationError: Failure to send data 并导致通道关闭。
  */
 const CHUNK_SIZE = 32 * 1024;
+
+/** `file-complete` 早于部分分片到达时，短暂重试组装（unordered 或实现差异时的兜底） */
+const RECEIVE_ASSEMBLE_RETRY_MS = 50;
+const RECEIVE_ASSEMBLE_MAX_ATTEMPTS = 80;
 
 /** 允许更多数据在途；与较小分片搭配，略降阈值以便更早背压 */
 const DC_SEND_BUFFER_HIGH_WATER = 2 * 1024 * 1024;
@@ -200,6 +261,7 @@ async function detectIceTransportPath(pc: RTCPeerConnection): Promise<{
 export interface Peer {
   id: string;
   name?: string;
+  /** 与 mb-pairdrop `peer.name.deviceName` / 卡片 `.device-name` 同源（服务端 UA 解析） */
   deviceType?: string;
   connection: RTCPeerConnection;
   dataChannel?: RTCDataChannel;
@@ -235,19 +297,50 @@ export interface ReceivedFile {
 export interface TransferRequest {
   requestId: string;
   fromPeerId: string;
+  /** 与 Socket `peer-joined` / Peer.name 一致的对端展示名（如「可爱蘑菇」） */
+  fromPeerName?: string;
   filesInfo: { name: string; size: number }[];
 }
 
+/** 发送方雷达卡片：等待对端确认 / 被拒提示 / 传输结束短时提示 */
+export type OutgoingTransferHint = 'waiting' | 'rejected' | 'completed';
+
 export function useWebRTC(roomId: string | null) {
   const [myPeerId, setMyPeerId] = useState<string>('');
-  const [myPeerName, setMyPeerName] = useState<string>('');
+  const [myPeerName, setMyPeerName] = useState<string>(() => getEffectiveDisplayName());
   const [myDeviceType, setMyDeviceType] = useState<string>('');
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map());
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<TransferRequest[]>([]);
+  /** 发送端：各对端设备上的传输提示（与 RadarView 展示同步） */
+  const [outgoingTransferHint, setOutgoingTransferHint] = useState<Record<string, OutgoingTransferHint>>({});
   /** 信令（Socket）已加入房间；与 WebRTC 是否可传文件无关 */
   const [signalingInRoom, setSignalingInRoom] = useState(false);
+
+  const updateOutgoingHint = useCallback((peerId: string, hint: OutgoingTransferHint | null) => {
+    setOutgoingTransferHint((prev) => {
+      const next = { ...prev };
+      if (hint === null) {
+        delete next[peerId];
+      } else {
+        next[peerId] = hint;
+      }
+      return next;
+    });
+  }, []);
+
+  /** 进入房间后再读一次地址栏，避免与信令时序或其它逻辑导致展示名未带上 */
+  useEffect(() => {
+    if (!roomId) return;
+    const fromUrl = readDisplayNameFromUrl().trim();
+    if (fromUrl) {
+      setMyPeerName(fromUrl.slice(0, 64));
+      return;
+    }
+    setMyPeerName(getEffectiveDisplayName());
+  }, [roomId]);
+
   const socketRef = useRef<Socket | null>(null);
   /** 主动 close 时跳过 disconnect 里的 setState，避免卸载清理顺序导致泄漏或更新已卸载树 */
   const skipSocketDisconnectStateRef = useRef(false);
@@ -263,10 +356,60 @@ export function useWebRTC(roomId: string | null) {
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const transfersRef = useRef<Map<string, TransferProgress>>(new Map());
   const receivedChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map());
+  /** 分片早于 file-start 到达时暂存（unordered DC） */
+  const orphanChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map());
+  const receiveAssembleTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const fileMetadataRef = useRef<Map<string, { name: string; size: number; type: string; totalChunks: number; fromPeerId: string }>>(new Map());
-  const pendingRequestsRef = useRef<Map<string, { resolve: () => void; reject: (reason: string) => void }>>(new Map());
+  const pendingRequestsRef = useRef<
+    Map<string, { peerId: string; resolve: () => void; reject: (reason: unknown) => void }>
+  >(new Map());
+
+  /** 对端断开 / DC 关闭 / 信令断开时立即结束「等待对方确认」，避免 sendFilesBatch 挂起导致 UI 一直「发送中」 */
+  const rejectPendingTransferRequestsForPeer = (peerId: string, reason: Error) => {
+    const map = pendingRequestsRef.current;
+    for (const [requestId, entry] of [...map.entries()]) {
+      if (entry.peerId === peerId) {
+        map.delete(requestId);
+        entry.reject(reason);
+      }
+    }
+  };
+
+  const rejectAllPendingTransferRequests = (reason: Error) => {
+    const map = pendingRequestsRef.current;
+    for (const [requestId, entry] of [...map.entries()]) {
+      map.delete(requestId);
+      entry.reject(reason);
+    }
+  };
   /** DataChannel 打开后解析 getStats，每渲染更新 .current */
   const refreshIcePathRef = useRef<(peerId: string) => void>(() => {});
+  /** 信令下发的对端展示名（地址栏 name），在 createPeerConnection 时写入 Peer.name */
+  const peerDisplayNamesRef = useRef<Map<string, string>>(new Map());
+  /** 与 mb-pairdrop server/peer.js deviceName 同源：服务端按 UA 解析的设备描述，写入 Peer.deviceType */
+  const peerDeviceTypesRef = useRef<Map<string, string>>(new Map());
+
+  const applyRemoteDisplayName = useCallback((peerId: string, displayName: string) => {
+    const trimmed = displayName.trim().slice(0, 64);
+    if (!trimmed) return;
+    peerDisplayNamesRef.current.set(peerId, trimmed);
+    const p = peersRef.current.get(peerId);
+    if (p) {
+      p.name = trimmed;
+      setPeers(new Map(peersRef.current));
+    }
+  }, []);
+
+  const applyRemoteDeviceSubtitle = useCallback((peerId: string, deviceSubtitle: string) => {
+    const trimmed = deviceSubtitle.trim();
+    if (!trimmed) return;
+    peerDeviceTypesRef.current.set(peerId, trimmed);
+    const p = peersRef.current.get(peerId);
+    if (p) {
+      p.deviceType = trimmed;
+      setPeers(new Map(peersRef.current));
+    }
+  }, []);
 
   // Update refs when state changes
   useEffect(() => {
@@ -302,17 +445,130 @@ export function useWebRTC(roomId: string | null) {
     };
   }, []);
 
+  const clearReceiveAssembleTimer = useCallback((fileId: string) => {
+    const t = receiveAssembleTimersRef.current.get(fileId);
+    if (t) {
+      clearTimeout(t);
+      receiveAssembleTimersRef.current.delete(fileId);
+    }
+  }, []);
+
+  const failReceiveAssembly = useCallback(
+    (fileId: string, detail: string) => {
+      clearReceiveAssembleTimer(fileId);
+      console.error('[DataChannel] 分片缺失，丢弃损坏文件:', fileId, detail);
+      orphanChunksRef.current.delete(fileId);
+      fileMetadataRef.current.delete(fileId);
+      receivedChunksRef.current.delete(fileId);
+      setTransfers((prev) => {
+        const updated = new Map(prev);
+        const tr = updated.get(fileId);
+        if (tr) {
+          tr.status = 'error';
+          updated.set(fileId, tr);
+        }
+        return updated;
+      });
+    },
+    [clearReceiveAssembleTimer]
+  );
+
+  const finalizeReceiveFileTransfer = useCallback(
+    (fileId: string): 'completed' | 'incomplete' | 'aborted' => {
+      const metadata = fileMetadataRef.current.get(fileId);
+      const chunks = receivedChunksRef.current.get(fileId);
+      if (!metadata || !chunks) return 'aborted';
+
+      for (let i = 0; i < metadata.totalChunks; i++) {
+        if (!chunks.has(i)) return 'incomplete';
+      }
+
+      const orderedChunks: ArrayBuffer[] = [];
+      for (let i = 0; i < metadata.totalChunks; i++) {
+        orderedChunks.push(chunks.get(i)!);
+      }
+
+      const blob = new Blob(orderedChunks, { type: metadata.type });
+      const receivedFile: ReceivedFile = {
+        id: fileId,
+        name: metadata.name,
+        size: metadata.size,
+        type: metadata.type,
+        blob,
+        fromPeerId: metadata.fromPeerId,
+        timestamp: Date.now(),
+      };
+
+      clearReceiveAssembleTimer(fileId);
+      orphanChunksRef.current.delete(fileId);
+      setReceivedFiles((prev) => [...prev, receivedFile]);
+      setTransfers((prev) => {
+        const updated = new Map(prev);
+        const transfer = updated.get(fileId);
+        if (transfer) {
+          transfer.status = 'completed';
+          transfer.sentBytes = metadata.size;
+          updated.set(fileId, transfer);
+        }
+        return updated;
+      });
+      fileMetadataRef.current.delete(fileId);
+      receivedChunksRef.current.delete(fileId);
+      return 'completed';
+    },
+    [clearReceiveAssembleTimer]
+  );
+
+  const scheduleReceiveAssemblyRetries = useCallback(
+    (fileId: string, attempt: number) => {
+      const existing = receiveAssembleTimersRef.current.get(fileId);
+      if (existing) clearTimeout(existing);
+
+      if (attempt >= RECEIVE_ASSEMBLE_MAX_ATTEMPTS) {
+        receiveAssembleTimersRef.current.delete(fileId);
+        const metadata = fileMetadataRef.current.get(fileId);
+        const chunks = receivedChunksRef.current.get(fileId);
+        const got = chunks?.size ?? 0;
+        failReceiveAssembly(
+          fileId,
+          metadata ? `超时仍未收齐分片 ${got}/${metadata.totalChunks}` : '状态已丢失'
+        );
+        return;
+      }
+
+      const delay = attempt === 0 ? 0 : RECEIVE_ASSEMBLE_RETRY_MS;
+      const t = setTimeout(() => {
+        receiveAssembleTimersRef.current.delete(fileId);
+        const r = finalizeReceiveFileTransfer(fileId);
+        if (r === 'completed' || r === 'aborted') return;
+        scheduleReceiveAssemblyRetries(fileId, attempt + 1);
+      }, delay);
+      receiveAssembleTimersRef.current.set(fileId, t);
+    },
+    [failReceiveAssembly, finalizeReceiveFileTransfer]
+  );
+
   const handleDataChannelMessage = useCallback((peerId: string, data: string | ArrayBuffer) => {
     if (typeof data === 'string') {
       // Metadata or control message
       try {
         const message = JSON.parse(data);
+        if (message.type === 'peer-display') {
+          const dn = typeof message.displayName === 'string' ? message.displayName : '';
+          applyRemoteDisplayName(peerId, dn);
+          return;
+        }
         if (message.type === 'transfer-request') {
+          const fromPeerName =
+            peersRef.current.get(peerId)?.name?.trim() ||
+            peerDisplayNamesRef.current.get(peerId)?.trim() ||
+            '';
           setIncomingRequests(prev => [
             ...prev,
             {
               requestId: message.requestId,
               fromPeerId: peerId,
+              fromPeerName: fromPeerName || undefined,
               filesInfo: message.filesInfo,
             }
           ]);
@@ -337,7 +593,15 @@ export function useWebRTC(roomId: string | null) {
             fromPeerId: peerId
           });
           receivedChunksRef.current.set(fileId, new Map());
-          
+          const bucket = receivedChunksRef.current.get(fileId)!;
+          const orphans = orphanChunksRef.current.get(fileId);
+          if (orphans) {
+            orphanChunksRef.current.delete(fileId);
+            orphans.forEach((buf, idx) => {
+              bucket.set(idx, buf);
+            });
+          }
+
           setTransfers(prev => {
             const updated = new Map(prev);
             updated.set(fileId, {
@@ -353,66 +617,10 @@ export function useWebRTC(roomId: string | null) {
             return updated;
           });
         } else if (message.type === 'file-complete') {
-          // Reassemble file
           const fileId = message.fileId;
-          const metadata = fileMetadataRef.current.get(fileId);
-          const chunks = receivedChunksRef.current.get(fileId);
-          
-          if (metadata && chunks) {
-            const orderedChunks: ArrayBuffer[] = [];
-            for (let i = 0; i < metadata.totalChunks; i++) {
-              const chunk = chunks.get(i);
-              if (chunk) {
-                orderedChunks.push(chunk);
-              }
-            }
-            if (orderedChunks.length !== metadata.totalChunks) {
-              console.error(
-                '[DataChannel] 分片缺失，丢弃损坏文件:',
-                fileId,
-                `收到 ${orderedChunks.length}/${metadata.totalChunks}`
-              );
-              fileMetadataRef.current.delete(fileId);
-              receivedChunksRef.current.delete(fileId);
-              setTransfers((prev) => {
-                const updated = new Map(prev);
-                const t = updated.get(fileId);
-                if (t) {
-                  t.status = 'error';
-                  updated.set(fileId, t);
-                }
-                return updated;
-              });
-              return;
-            }
-
-            const blob = new Blob(orderedChunks, { type: metadata.type });
-            const receivedFile: ReceivedFile = {
-              id: fileId,
-              name: metadata.name,
-              size: metadata.size,
-              type: metadata.type,
-              blob,
-              fromPeerId: metadata.fromPeerId,
-              timestamp: Date.now()
-            };
-            
-            setReceivedFiles(prev => [...prev, receivedFile]);
-            
-            setTransfers(prev => {
-              const updated = new Map(prev);
-              const transfer = updated.get(fileId);
-              if (transfer) {
-                transfer.status = 'completed';
-                transfer.sentBytes = metadata.size;
-                updated.set(fileId, transfer);
-              }
-              return updated;
-            });
-            
-            // Cleanup
-            fileMetadataRef.current.delete(fileId);
-            receivedChunksRef.current.delete(fileId);
+          const r = finalizeReceiveFileTransfer(fileId);
+          if (r === 'incomplete') {
+            scheduleReceiveAssemblyRetries(fileId, 0);
           }
         }
       } catch (e) {
@@ -425,11 +633,15 @@ export function useWebRTC(roomId: string | null) {
       const fileId = new TextDecoder().decode(new Uint8Array(data, 4, fileIdLength));
       const chunkIndex = view.getUint32(4 + fileIdLength);
       const chunkData = new Uint8Array(data, 8 + fileIdLength);
-      
+      const chunkBuf = chunkData.buffer.slice(
+        chunkData.byteOffset,
+        chunkData.byteOffset + chunkData.byteLength
+      );
+
       const chunks = receivedChunksRef.current.get(fileId);
       if (chunks) {
-        chunks.set(chunkIndex, chunkData.buffer.slice(chunkData.byteOffset, chunkData.byteOffset + chunkData.byteLength));
-        
+        chunks.set(chunkIndex, chunkBuf);
+
         const metadata = fileMetadataRef.current.get(fileId);
         if (metadata) {
           let receivedBytes = 0;
@@ -444,18 +656,42 @@ export function useWebRTC(roomId: string | null) {
             }
             return updated;
           });
+
+          if (chunks.size === metadata.totalChunks) {
+            void finalizeReceiveFileTransfer(fileId);
+          }
         }
+      } else {
+        let pending = orphanChunksRef.current.get(fileId);
+        if (!pending) {
+          pending = new Map();
+          orphanChunksRef.current.set(fileId, pending);
+        }
+        pending.set(chunkIndex, chunkBuf);
       }
     }
-  }, []);
+  }, [
+    applyRemoteDisplayName,
+    finalizeReceiveFileTransfer,
+    scheduleReceiveAssemblyRetries,
+  ]);
   const removePeer = useCallback((peerId: string) => {
     console.log('[WebRTC] Removing peer:', peerId);
+    rejectPendingTransferRequestsForPeer(peerId, new Error('对端已断开连接'));
     const peer = peersRef.current.get(peerId);
     if (peer) {
       peer.connection.close();
       peersRef.current.delete(peerId);
     }
     pendingIceCandidatesRef.current.delete(peerId);
+    peerDisplayNamesRef.current.delete(peerId);
+    peerDeviceTypesRef.current.delete(peerId);
+    setOutgoingTransferHint((prev) => {
+      if (!(peerId in prev)) return prev;
+      const next = { ...prev };
+      delete next[peerId];
+      return next;
+    });
     setPeers(prev => {
       const updated = new Map(prev);
       updated.delete(peerId);
@@ -474,12 +710,21 @@ export function useWebRTC(roomId: string | null) {
         peerInRef.iceTransportPath = undefined;
         peerInRef.iceTransportDetail = undefined;
       }
+      try {
+        const label = getEffectiveDisplayName();
+        if (label && dataChannel.readyState === 'open') {
+          dataChannel.send(JSON.stringify({ type: 'peer-display', displayName: label }));
+        }
+      } catch {
+        /* ignore */
+      }
       setPeers(new Map(peersRef.current));
       refreshIcePathRef.current(peerId);
     };
 
     dataChannel.onclose = () => {
       console.log('[DataChannel] Closed with:', peerId);
+      rejectPendingTransferRequestsForPeer(peerId, new Error('数据通道已关闭'));
       const peerInRef = peersRef.current.get(peerId);
       if (peerInRef) {
         peerInRef.iceTransportPath = undefined;
@@ -515,15 +760,28 @@ export function useWebRTC(roomId: string | null) {
     const existingPeer = peersRef.current.get(peerId);
     if (existingPeer) {
       console.log('[WebRTC] Connection to', peerId, 'already exists, reusing');
+      const dn = peerDisplayNamesRef.current.get(peerId)?.trim();
+      if (dn && existingPeer.name !== dn) {
+        existingPeer.name = dn;
+        setPeers(new Map(peersRef.current));
+      }
+      const dt = peerDeviceTypesRef.current.get(peerId)?.trim();
+      if (dt && existingPeer.deviceType !== dt) {
+        existingPeer.deviceType = dt;
+        setPeers(new Map(peersRef.current));
+      }
       return existingPeer.connection;
     }
     
     console.log('[WebRTC] Creating connection to', peerId, 'isInitiator:', isInitiator);
     
     const pc = new RTCPeerConnection(rtcConfigRef.current);
-    
+    const remoteName = peerDisplayNamesRef.current.get(peerId)?.trim();
+    const remoteDeviceSubtitle = peerDeviceTypesRef.current.get(peerId)?.trim();
     const newPeer: Peer = {
       id: peerId,
+      name: remoteName || undefined,
+      deviceType: remoteDeviceSubtitle || undefined,
       connection: pc,
       status: 'connecting',
       iceCandidates: [],
@@ -644,8 +902,9 @@ export function useWebRTC(roomId: string | null) {
 
     // Data channel handling
     if (isInitiator) {
+      // 文件传输依赖顺序：unordered 时 control 与 binary 可能乱序，file-complete 会早于分片触发「分片缺失」
       const dataChannel = pc.createDataChannel('fileTransfer', {
-        ordered: false,
+        ordered: true,
       });
       console.log('[WebRTC] Created data channel for:', peerId, 'readyState:', dataChannel.readyState);
       setupDataChannel(peerId, dataChannel);
@@ -844,7 +1103,8 @@ export function useWebRTC(roomId: string | null) {
 
       newSocket.on('connect', () => {
         console.log('[Socket] Connected: socket.id=', newSocket.id, 'emit join-room');
-        newSocket.emit('join-room', roomId);
+        // 第二参为展示名，旧服务端仅读首参 string 仍可进房
+        newSocket.emit('join-room', roomId, getEffectiveDisplayName());
       });
 
       newSocket.on(
@@ -856,6 +1116,7 @@ export function useWebRTC(roomId: string | null) {
           name,
           deviceType,
           peers: existingPeers,
+          peerInfos,
         }: {
           roomId: string;
           peerId: string;
@@ -863,15 +1124,31 @@ export function useWebRTC(roomId: string | null) {
           name?: string;
           deviceType?: string;
           peers: string[];
+          peerInfos?: { id: string; displayName?: string; deviceType?: string }[];
         }) => {
         console.log('[Socket] Joined room:', joinedRoomId, 'as stable peerId', peerId);
         setSignalingInRoom(true);
         myStablePeerIdRef.current = peerId;
         setMyPeerId(peerId);
-        if (name) setMyPeerName(name);
+        setMyPeerName((prev) => {
+          const fromUrl = readDisplayNameFromUrl().trim();
+          if (fromUrl) return fromUrl.slice(0, 64);
+          const serverName = typeof name === 'string' ? name.trim() : '';
+          if (serverName) return serverName.slice(0, 64);
+          return prev || getEffectiveDisplayName();
+        });
         if (deviceType) setMyDeviceType(deviceType);
         if (peerIdHash) {
           savePeerAuth(peerId, peerIdHash);
+        }
+
+        if (Array.isArray(peerInfos)) {
+          for (const row of peerInfos) {
+            if (row && typeof row.id === 'string') {
+              applyRemoteDisplayName(row.id, typeof row.displayName === 'string' ? row.displayName : '');
+              applyRemoteDeviceSubtitle(row.id, typeof row.deviceType === 'string' ? row.deviceType : '');
+            }
+          }
         }
 
         if (existingPeers && existingPeers.length > 0) {
@@ -889,8 +1166,27 @@ export function useWebRTC(roomId: string | null) {
         }
       );
 
-      newSocket.on('peer-joined', (joinedPeerId: string) => {
-        console.log('[Socket] Peer joined:', joinedPeerId);
+      newSocket.on('peer-joined', (payload: unknown, displayNameArg?: unknown) => {
+        let joinedPeerId: string;
+        let remoteDisplay = '';
+        let remoteDeviceSubtitle = '';
+        if (payload && typeof payload === 'object' && !Array.isArray(payload) && 'peerId' in payload) {
+          const o = payload as { peerId: string; displayName?: string; deviceType?: string };
+          joinedPeerId = o.peerId;
+          remoteDisplay = typeof o.displayName === 'string' ? o.displayName : '';
+          remoteDeviceSubtitle = typeof o.deviceType === 'string' ? o.deviceType : '';
+        } else if (Array.isArray(payload) && typeof payload[0] === 'string') {
+          joinedPeerId = payload[0];
+          remoteDisplay = typeof payload[1] === 'string' ? payload[1] : '';
+        } else if (typeof payload === 'string') {
+          joinedPeerId = payload;
+          remoteDisplay = typeof displayNameArg === 'string' ? displayNameArg : '';
+        } else {
+          return;
+        }
+        console.log('[Socket] Peer joined:', joinedPeerId, remoteDisplay ? `name=${remoteDisplay}` : '');
+        if (remoteDisplay) applyRemoteDisplayName(joinedPeerId, remoteDisplay);
+        if (remoteDeviceSubtitle) applyRemoteDeviceSubtitle(joinedPeerId, remoteDeviceSubtitle);
         const myId = myStablePeerIdRef.current;
         if (joinedPeerId === myId) {
           console.log('[Socket] Ignoring self join');
@@ -928,10 +1224,13 @@ export function useWebRTC(roomId: string | null) {
           return;
         }
         console.log('[Socket] Disconnected');
+        rejectAllPendingTransferRequests(new Error('信令已断开，请稍后重试'));
         setSignalingInRoom(false);
         peersRef.current.forEach((p) => p.connection.close());
         peersRef.current.clear();
         pendingIceCandidatesRef.current.clear();
+        peerDisplayNamesRef.current.clear();
+        peerDeviceTypesRef.current.clear();
         setPeers(new Map());
       });
     };
@@ -960,7 +1259,7 @@ export function useWebRTC(roomId: string | null) {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [roomId, createPeerConnection, handleOffer, handleAnswer, handleIceCandidate, removePeer]);
+  }, [roomId, createPeerConnection, handleOffer, handleAnswer, handleIceCandidate, removePeer, applyRemoteDisplayName, applyRemoteDeviceSubtitle]);
 
   // Separate cleanup effect for component unmount
   useEffect(() => {
@@ -979,6 +1278,9 @@ export function useWebRTC(roomId: string | null) {
       });
       peerMap.clear();
       pendingMap.clear();
+      receiveAssembleTimersRef.current.forEach((tid) => clearTimeout(tid));
+      receiveAssembleTimersRef.current.clear();
+      orphanChunksRef.current.clear();
     };
   }, []);
 
@@ -1119,9 +1421,21 @@ export function useWebRTC(roomId: string | null) {
   }, []);
 
   const sendFilesBatch = useCallback(async (files: File[], targetPeerId: string) => {
+    console.log('[WebRTC] sendFilesBatch 待发送文件列表', {
+      targetPeerId,
+      count: files.length,
+      files: files.map(describeFileForLog),
+    });
+
     const peer = peersRef.current.get(targetPeerId);
     if (!peer || peer.status !== 'connected' || peer.dataChannel?.readyState !== 'open') {
       throw new Error('Peer not connected');
+    }
+
+    for (const entry of pendingRequestsRef.current.values()) {
+      if (entry.peerId === targetPeerId) {
+        throw new Error('该设备已有待确认的传输请求');
+      }
     }
 
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
@@ -1134,26 +1448,41 @@ export function useWebRTC(roomId: string | null) {
       filesInfo
     };
 
+    updateOutgoingHint(targetPeerId, 'waiting');
+
     await waitUntilDataChannelCanSend(peer.dataChannel);
     peer.dataChannel.send(JSON.stringify(requestMessage));
 
     // Wait for response
-    await new Promise<void>((resolve, reject) => {
-      pendingRequestsRef.current.set(requestId, { resolve, reject });
-      // Optional timeout
-      setTimeout(() => {
-        if (pendingRequestsRef.current.has(requestId)) {
-          pendingRequestsRef.current.delete(requestId);
-          reject(new Error('Transfer request timeout'));
-        }
-      }, 60000); // 60 seconds timeout
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        pendingRequestsRef.current.set(requestId, { peerId: targetPeerId, resolve, reject });
+        setTimeout(() => {
+          if (pendingRequestsRef.current.has(requestId)) {
+            pendingRequestsRef.current.delete(requestId);
+            reject(new Error('Transfer request timeout'));
+          }
+        }, 60000);
+      });
+    } catch (e) {
+      updateOutgoingHint(targetPeerId, null);
+      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
+      if (msg === 'User rejected the transfer') {
+        updateOutgoingHint(targetPeerId, 'rejected');
+        window.setTimeout(() => updateOutgoingHint(targetPeerId, null), 2000);
+      }
+      throw e;
+    }
 
-    // If accepted, send files one by one
+    updateOutgoingHint(targetPeerId, null);
+
     for (const file of files) {
       await sendFile(file, targetPeerId);
     }
-  }, [sendFile]);
+
+    updateOutgoingHint(targetPeerId, 'completed');
+    window.setTimeout(() => updateOutgoingHint(targetPeerId, null), 2000);
+  }, [sendFile, updateOutgoingHint]);
 
   const respondToTransferRequest = useCallback((requestId: string, accepted: boolean) => {
     setIncomingRequests(prev => {
@@ -1199,6 +1528,7 @@ export function useWebRTC(roomId: string | null) {
     sendFile,
     sendFilesBatch,
     incomingRequests,
+    outgoingTransferHint,
     respondToTransferRequest,
     downloadFile
   };

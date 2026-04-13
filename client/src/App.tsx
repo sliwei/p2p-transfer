@@ -11,13 +11,27 @@ import { useAppDropEmbed } from './hooks/useAppDropEmbed'
 import { useRoom } from './hooks/useRoom'
 import { type ReceivedFile, useWebRTC } from './hooks/useWebRTC'
 import jsBridge from './utils/js-bridge'
+import { buildRoomShareUrl } from './utils/roomLink'
 
 function App() {
   const { roomId, inputRoomId, setInputRoomId, joinRoom, generateRoomId } = useRoom()
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, respondToTransferRequest, downloadFile, myPeerId, myPeerName } = useWebRTC(roomId)
+  const {
+    peers,
+    transfers,
+    receivedFiles,
+    sendFilesBatch,
+    incomingRequests,
+    outgoingTransferHint,
+    respondToTransferRequest,
+    downloadFile,
+    myPeerId,
+    myPeerName
+  } = useWebRTC(roomId)
+
+  const roomLink = useMemo(() => buildRoomShareUrl(roomId ?? ''), [roomId])
 
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
 
@@ -42,6 +56,16 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [isSending, setIsSending] = useState(false)
 
+  /** 仅当对端从就绪列表消失时兜底结束「发送中」（不因用户手动取消勾选清空 selectedPeers 而误清，否则会与仍在等待确认的 send 不同步） */
+  useEffect(() => {
+    if (!isSending) return
+    if (selectedPeers.length === 0) return
+    const anyStillReady = selectedPeers.some((id) => readyPeers.some((p) => p.id === id))
+    if (!anyStillReady) {
+      setIsSending(false)
+    }
+  }, [isSending, selectedPeers, readyPeers])
+
   const [showReceivedModal, setShowReceivedModal] = useState(false)
   const prevReceivingCountRef = useRef(0)
   const lastReceivedFilesRef = useRef<ReceivedFile[]>([])
@@ -61,15 +85,9 @@ function App() {
     onReceiveFiles: onReceiveEmbedFiles
   })
 
-  const handleDropZoneFilesChange = useCallback(
-    (files: File[]) => {
-      setSelectedFiles(files)
-      if (files.length > 0) {
-        notifySelectFile()
-      }
-    },
-    [notifySelectFile]
-  )
+  const handleDropZoneFilesChange = useCallback((files: File[]) => {
+    setSelectedFiles(files)
+  }, [])
 
   const onReceivedFileInFlow = useCallback(
     (f: ReceivedFile) => {
@@ -93,9 +111,9 @@ function App() {
       prevReceivingCountRef.current = completedCount
       lastReceivedFilesRef.current = receivedFiles
     }
-  }, [transfers, receivedFiles, onReceivedFileInFlow])
+  }, [transfers, receivedFiles])
   const handleSendFiles = async () => {
-    if (selectedFiles.length === 0 || selectedPeers.length === 0) return
+    if (selectedFiles.length === 0 || selectedPeers.length === 0 || isSending) return
 
     setIsSending(true)
     try {
@@ -103,9 +121,6 @@ function App() {
       await Promise.allSettled(
         selectedPeers.map(async (peerId) => {
           await sendFilesBatch(selectedFiles, peerId)
-          for (const file of selectedFiles) {
-            notifyFileFlow(file)
-          }
         })
       )
       // Keep files selected or clear them? Usually clear after send.
@@ -123,10 +138,8 @@ function App() {
     return <RoomJoin roomId={inputRoomId} onRoomIdChange={setInputRoomId} onJoin={joinRoom} onGenerate={generateRoomId} />
   }
 
-  const roomLink = window.location.href
-
   return (
-    <div className="flex min-h-screen flex-col bg-white font-sans relative overflow-hidden">
+    <div className="relative flex h-[100dvh] min-h-0 flex-col overflow-hidden overscroll-none bg-white font-sans">
       <RadarCanvas animate={readyPeers.length === 0} />
 
       <div className="fixed left-1/2 top-[62%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-0">
@@ -150,12 +163,10 @@ function App() {
             ></path>
           </svg>
         </div>
-        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-2 rounded-full">
-          {myPeerName || myPeerId.slice(0, 4)}
-        </span>
+        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-2 rounded-full">{myPeerName || myPeerId.slice(0, 4)}</span>
       </div>
 
-      <div className="relative z-10 flex flex-col min-h-screen pointer-events-none">
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col pointer-events-none">
         <div className="pointer-events-auto">
           <SelectedFilesList
             files={selectedFiles}
@@ -168,7 +179,14 @@ function App() {
         </div>
 
         <div className="flex-1 pointer-events-auto">
-          <RadarView peers={readyPeers} selectedPeers={selectedPeers} onTogglePeer={handleTogglePeer} transfers={transfers} />
+          <RadarView
+            peers={readyPeers}
+            selectedPeers={selectedPeers}
+            onTogglePeer={handleTogglePeer}
+            transfers={transfers}
+            outgoingTransferHint={outgoingTransferHint}
+            peerSelectionLocked={isSending}
+          />
         </div>
 
         <div className="pointer-events-auto">
@@ -203,7 +221,7 @@ function App() {
         {incomingRequests.length > 0 && (
           <div className="pointer-events-auto">
             <TransferRequestModal
-              peerName={incomingRequests[0].fromPeerId.slice(0, 6)}
+              name={incomingRequests[0].fromPeerName?.trim() || incomingRequests[0].fromPeerId.slice(0, 6)}
               fileCount={incomingRequests[0].filesInfo.length}
               onAcceptAlbum={() => {
                 respondToTransferRequest(incomingRequests[0].requestId, true)

@@ -10,8 +10,9 @@ export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, o
   if (files.length === 0) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 animate-in fade-in duration-200">
-      <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden flex flex-col max-h-[80vh] shadow-xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overscroll-none p-4 animate-in fade-in duration-200">
+      <div className="absolute inset-0 bg-black/50" aria-hidden />
+      <div className="relative z-10 bg-white rounded-2xl w-full max-w-sm overflow-hidden flex flex-col max-h-[80vh] shadow-xl">
         <div className="px-5 py-4 border-b border-[#F0F0F0] flex justify-between items-center">
           <h3 className="text-[17px] font-medium text-[#333333]">接收成功</h3>
           <button onClick={onClose} className="text-[#999999] hover:text-[#333333] transition-colors">
