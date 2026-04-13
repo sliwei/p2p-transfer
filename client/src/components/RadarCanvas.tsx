@@ -99,5 +99,10 @@ export const RadarCanvas: React.FC<{ animate: boolean }> = ({ animate: shouldAni
     }
   }, [])
 
-  return <canvas ref={canvasRef} className="fixed inset-0 w-full h-full pointer-events-none z-0" />
+  // Safari 对视口边缘的 fixed 采样 background；canvas 上灰线会令顶/底栏发灰，故白底 fixed 壳 + absolute 画布。
+  return (
+    <div className="fixed inset-0 z-0 bg-white pointer-events-none">
+      <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" />
+    </div>
+  )
 }

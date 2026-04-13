@@ -39,26 +39,41 @@ export interface DropReceiveFileItem {
   url?: string
   path?: string
   messageId?: string
+  /** 封面图：非空时列表预览优先用（data URL / http(s) / 纯 base64 均可） */
+  cover?: string
 }
 
-function itemToFile(item: DropReceiveFileItem): Promise<File> {
+/** 带可选 cover 的 File（dropReceiveFile 协议解析结果） */
+export type DropReceiveFile = File & { cover?: string }
+
+function attachCover(file: File, item: DropReceiveFileItem): DropReceiveFile {
+  const raw = item.cover
+  if (raw == null) return file as DropReceiveFile
+  const cover = typeof raw === 'string' ? raw.trim() : ''
+  if (!cover) return file as DropReceiveFile
+  return Object.assign(file, { cover }) as DropReceiveFile
+}
+
+function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
   const name = item.name ?? item.fileName ?? 'file'
   const mime = item.mime ?? item.type ?? item.mimeType ?? 'application/octet-stream'
 
   if (item.data && typeof item.data === 'string') {
-    // eslint-disable-next-line @typescript-eslint/no-use-before-define
+     
     const base64 = stripDataUrlToBase64(item.data)
     const blob = base64ToBlob(base64, mime)
-    return Promise.resolve(new File([blob], name, { type: mime }))
+    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
   }
 
   if (item.base64 && typeof item.base64 === 'string') {
     const blob = base64ToBlob(item.base64, mime)
-    return Promise.resolve(new File([blob], name, { type: mime }))
+    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
   }
 
   if (item.url && typeof item.url === 'string') {
-    return urlToBlob(item.url).then((blob) => new File([blob], name, { type: item.type || blob.type || mime }))
+    return urlToBlob(item.url).then((blob) =>
+      attachCover(new File([blob], name, { type: item.type || blob.type || mime }), item)
+    )
   }
 
   return Promise.reject(new Error(`dropReceiveFile: 无法解析文件项（需 data, base64 或 url）: ${name}`))
@@ -73,7 +88,7 @@ function itemToFile(item: DropReceiveFileItem): Promise<File> {
  * - `{ files: [ { ... }, ... ] }`
  * - `{ name, base64, type? }` 单文件
  */
-export async function filesFromDropReceivePayload(data: unknown): Promise<File[]> {
+export async function filesFromDropReceivePayload(data: unknown): Promise<DropReceiveFile[]> {
   if (data == null) return []
 
   if (typeof data === 'string') {
@@ -136,4 +151,15 @@ export function blobToBase64DataUrl(blob: Blob): Promise<string> {
 export function stripDataUrlToBase64(dataUrl: string): string {
   const i = dataUrl.indexOf(',')
   return i >= 0 ? dataUrl.slice(i + 1) : dataUrl
+}
+
+/** 协议中的 cover 转为可用于图片 src 的地址（data URL / 绝对 URL 原样返回；否则按 base64 + MIME 包装） */
+export function coverToImageSrc(cover: string, file: File): string {
+  const c = cover.trim()
+  if (!c) return ''
+  if (c.startsWith('data:') || c.startsWith('http://') || c.startsWith('https://') || c.startsWith('blob:')) {
+    return c
+  }
+  const mime = file.type && file.type.startsWith('image/') ? file.type : 'image/jpeg'
+  return `data:${mime};base64,${c}`
 }

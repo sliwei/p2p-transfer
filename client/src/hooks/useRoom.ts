@@ -1,5 +1,7 @@
 import { useCallback, useState } from 'react'
 
+import { buildRoomShareUrl } from '../utils/roomLink'
+
 export function useRoom() {
   const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('roomid'))
   const [inputRoomId, setInputRoomId] = useState(
@@ -39,9 +41,7 @@ export function useRoom() {
 
   const copyRoomLink = useCallback(() => {
     if (!roomId) return;
-    const url = new URL(window.location.href);
-    url.searchParams.set('roomid', roomId);
-    navigator.clipboard.writeText(url.toString());
+    void navigator.clipboard.writeText(buildRoomShareUrl(roomId));
   }, [roomId]);
 
   return {

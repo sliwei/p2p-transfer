@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 
-import {
-  blobToBase64DataUrl,
-  type DropAppPayload,
-  filesFromDropReceivePayload
-} from '../utils/app-drop-protocol'
+import { blobToBase64DataUrl, type DropAppPayload, filesFromDropReceivePayload } from '../utils/app-drop-protocol'
 import jsBridge, { type JSBridgeHandler } from '../utils/js-bridge'
 import type { ReceivedFile } from './useWebRTC'
 
@@ -33,14 +29,16 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
       const dataUrl = await blobToBase64DataUrl(blob)
       const mime = file.type || blob.type || 'application/octet-stream'
       const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
-      
+
       const payload: DropAppPayload = {
-        items: [{
-          name: file.name,
-          kind,
-          mime,
-          data: dataUrl
-        }]
+        items: [
+          {
+            name: file.name,
+            kind,
+            mime,
+            data: dataUrl
+          }
+        ]
       }
       jsBridge.dropFileFlow(payload)
     } catch (e) {
@@ -56,12 +54,14 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
       const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
 
       const payload: DropAppPayload = {
-        items: [{
-          name: file.name,
-          kind,
-          mime,
-          data: dataUrl
-        }]
+        items: [
+          {
+            name: file.name,
+            kind,
+            mime,
+            data: dataUrl
+          }
+        ]
       }
       jsBridge.dropSaveFile(payload)
     } catch (e) {
