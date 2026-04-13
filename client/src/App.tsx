@@ -18,18 +18,7 @@ function App() {
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const {
-    peers,
-    transfers,
-    receivedFiles,
-    sendFilesBatch,
-    incomingRequests,
-    outgoingTransferHint,
-    respondToTransferRequest,
-    downloadFile,
-    myPeerId,
-    myPeerName
-  } = useWebRTC(roomId)
+  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, outgoingTransferHint, respondToTransferRequest, downloadFile, myPeerId, myPeerName } = useWebRTC(roomId)
 
   const roomLink = useMemo(() => buildRoomShareUrl(roomId ?? ''), [roomId])
 
@@ -163,7 +152,7 @@ function App() {
             ></path>
           </svg>
         </div>
-        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-2 rounded-full">{myPeerName || myPeerId.slice(0, 4)}</span>
+        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-1 rounded-full">{myPeerName || myPeerId.slice(0, 4)}</span>
       </div>
 
       <div className="relative z-10 flex min-h-0 flex-1 flex-col pointer-events-none">
