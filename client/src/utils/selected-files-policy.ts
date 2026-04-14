@@ -1,8 +1,8 @@
 /** 列表内最多文件数 */
-export const MAX_SELECTED_FILES = 10
+export const MAX_SELECTED_FILES = 100
 
 /** 单文件须严格小于该字节数（200 MiB） */
-export const MAX_SINGLE_FILE_BYTES = 200 * 1024 * 1024
+export const MAX_SINGLE_FILE_BYTES = 2000 * 1024 * 1024
 
 /** 列表内各文件大小之和不得超过该上限（再添加时若会使总和大于该值则不可加入，与个数无关） */
 export const MAX_SELECTED_TOTAL_BYTES = MAX_SINGLE_FILE_BYTES

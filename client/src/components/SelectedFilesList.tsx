@@ -98,12 +98,14 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
 
   return (
     <div className="w-full px-4 py-3">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[17px] font-medium text-[#333333]">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <h2 className="min-w-0 flex-1 text-[17px] font-medium text-[#333333]">
           选择{files.length}/{MAX_SELECTED_FILES}个文件
-          <span className="ml-1.5 text-[14px] font-normal text-[#888888]">（共 {formatFileSize(sumSelectedFilesBytes(files))}）</span>
+          <span className="mt-0.5 block text-[14px] font-normal text-[#888888] sm:mt-0 sm:ml-1.5 sm:inline">
+            （共 {formatFileSize(sumSelectedFilesBytes(files))}）
+          </span>
         </h2>
-        <div className="flex items-center gap-4">
+        <div className="flex shrink-0 items-center gap-4">
           <button
             type="button"
             onClick={handleSelectClick}
