@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 
-import { blobToBase64DataUrl, type DropAppPayload, filesFromDropReceivePayload } from '../utils/app-drop-protocol'
+import { blobToBase64DataUrl, type DropAppPayload, filesFromDropReceivePayload, filesToDropAppPayload } from '../utils/app-drop-protocol'
 import jsBridge, { type JSBridgeHandler } from '../utils/js-bridge'
 import type { ReceivedFile } from './useWebRTC'
 
@@ -17,9 +17,16 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
     onReceiveFilesRef.current = options.onReceiveFiles
   }, [options.onReceiveFiles])
 
-  const notifySelectFile = useCallback(() => {
+  const notifySelectFile = useCallback(async (files?: File[]) => {
     if (!jsBridge.isBridgeReady()) return
-    jsBridge.dropSelectFile()
+    try {
+      const payload = files?.length ? await filesToDropAppPayload(files) : { items: [] as DropAppPayload['items'] }
+      console.log('dropSelectFile', payload)
+      jsBridge.dropSelectFile(payload)
+    } catch (e) {
+      console.error('[AppDrop] dropSelectFile stash payload error', e)
+      jsBridge.dropSelectFile({ items: [] })
+    }
   }, [])
 
   const notifyFileFlow = useCallback(async (file: File | ReceivedFile) => {
@@ -46,34 +53,44 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
     }
   }, [])
 
-  const notifySaveToAlbum = useCallback(async (file: ReceivedFile) => {
-    if (!jsBridge.isBridgeReady()) return
+  const notifySaveToAlbumBatch = useCallback(async (files: ReceivedFile[], callback: (result: { ok: boolean }) => void) => {
+    if (!jsBridge.isBridgeReady()) {
+      callback?.({ ok: false })
+      return
+    }
+    if (files.length === 0) {
+      callback?.({ ok: true })
+      return
+    }
     try {
-      const dataUrl = await blobToBase64DataUrl(file.blob)
-      const mime = file.type || file.blob.type || 'application/octet-stream'
-      const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
-
-      const payload: DropAppPayload = {
-        items: [
-          {
-            name: file.name,
-            kind,
-            mime,
-            data: dataUrl
-          }
-        ]
-      }
-      jsBridge.dropSaveFile(payload)
+      const items = await Promise.all(
+        files.map(async (file) => {
+          const dataUrl = await blobToBase64DataUrl(file.blob)
+          const mime = file.type || file.blob.type || 'application/octet-stream'
+          const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
+          return { name: file.name, kind, mime, data: dataUrl }
+        })
+      )
+      const payload: DropAppPayload = { items }
+      jsBridge.dropSaveFile(payload, () => callback({ ok: true }))
     } catch (e) {
       console.error('[AppDrop] dropSaveFile error', e)
+      callback?.({ ok: false })
     }
   }, [])
+
+  const notifySaveToAlbum = useCallback(
+    async (file: ReceivedFile, callback: (result: { ok: boolean }) => void) => {
+      return notifySaveToAlbumBatch([file], callback)
+    },
+    [notifySaveToAlbumBatch]
+  )
 
   useEffect(() => {
     if (!jsBridge.isNativeEmbedHost()) return
 
     jsBridge.whenReady(() => {
-      jsBridge.dropLoadComplete({ page: 'p2p-transfer' })
+      jsBridge.dropLoadComplete()
     })
   }, [])
 
@@ -104,5 +121,5 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
     }
   }, [])
 
-  return { notifySelectFile, notifyFileFlow, notifySaveToAlbum }
+  return { notifySelectFile, notifyFileFlow, notifySaveToAlbum, notifySaveToAlbumBatch }
 }

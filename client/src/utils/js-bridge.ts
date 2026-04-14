@@ -101,7 +101,7 @@ class JsBridge {
     this.bridgePollTimeout = setTimeout(() => {
       this.clearBridgePoll()
       if (!this.isReady) {
-        console.warn('[JsBridge] 等待 WebViewJavascriptBridge 超时')
+        console.warn('[JsBridge] 未连接 WebViewJavascriptBridge')
       }
     }, BRIDGE_POLL_TIMEOUT)
   }
@@ -319,9 +319,12 @@ class JsBridge {
     this.callHandler('dropLoadComplete', extra ?? {}, callback)
   }
 
-  /** 2. 通知 APP：H5 侧已选/待传文件（无参；宿主自行处理后续动作） */
-  dropSelectFile(callback?: JSBridgeCallback): void {
-    this.callHandler('dropSelectFile', null, callback)
+  /**
+   * 2. 通知 APP：H5 侧已选/待传文件（宿主可暂存；WebView 关闭后可通过 dropReceiveFile 再下发）
+   * payload 建议与 dropFileFlow 一致：`{ items: [{ name, kind, mime, data? }, ...] }`
+   */
+  dropSelectFile(payload?: unknown, callback?: JSBridgeCallback): void {
+    this.callHandler('dropSelectFile', payload ?? null, callback)
   }
 
   /** 3. 插入对话流（发送成功或收到文件等） */

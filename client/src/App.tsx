@@ -31,10 +31,7 @@ function App() {
   const [selectedPeers, setSelectedPeers] = useState<string[]>([])
 
   /** 与就绪列表求交：对端掉线后 UI 与发送目标自动忽略已断连 id，无需 effect 回写 state */
-  const selectedPeersEffective = useMemo(
-    () => selectedPeers.filter((id) => readyPeerIds.has(id)),
-    [selectedPeers, readyPeerIds]
-  )
+  const selectedPeersEffective = useMemo(() => selectedPeers.filter((id) => readyPeerIds.has(id)), [selectedPeers, readyPeerIds])
 
   const handleTogglePeer = useCallback((peerId: string) => {
     setSelectedPeers((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]))
@@ -59,6 +56,7 @@ function App() {
 
   const [receiveAction, setReceiveAction] = useState<'album' | 'chat' | null>(null)
   const [pendingProcessFiles, setPendingProcessFiles] = useState<ReceivedFile[]>([])
+  const finishingReceivedRef = useRef(false)
 
   const onReceiveEmbedFiles = useCallback((files: File[]) => {
     if (!roomIdRef.current) {
@@ -68,20 +66,13 @@ function App() {
     setSelectedFiles((prev) => [...prev, ...files])
   }, [])
 
-  const { notifySelectFile, notifyFileFlow, notifySaveToAlbum } = useAppDropEmbed({
+  const { notifySelectFile, notifyFileFlow, notifySaveToAlbumBatch } = useAppDropEmbed({
     onReceiveFiles: onReceiveEmbedFiles
   })
 
   const handleDropZoneFilesChange = useCallback((files: File[]) => {
     setSelectedFiles(files)
   }, [])
-
-  const onReceivedFileInFlow = useCallback(
-    (f: ReceivedFile) => {
-      notifyFileFlow(f)
-    },
-    [notifyFileFlow]
-  )
 
   useEffect(() => {
     const receivingTransfers = transfers.filter((t) => t.direction === 'receiving')
@@ -149,7 +140,7 @@ function App() {
           <SelectedFilesList
             files={selectedFiles}
             onFilesChange={handleDropZoneFilesChange}
-            onSelectMore={notifySelectFile}
+            onSelectMore={() => notifySelectFile(selectedFiles)}
             onSendFiles={handleSendFiles}
             canSend={selectedPeersEffective.length > 0}
             isSending={isSending}
@@ -176,21 +167,29 @@ function App() {
             <ReceivedFilesModal
               files={pendingProcessFiles}
               onClose={() => setShowReceivedModal(false)}
-              onDone={() => {
-                setShowReceivedModal(false)
-                if (receiveAction === 'album') {
-                  if (jsBridge.isNativeEmbedHost()) {
-                    pendingProcessFiles.forEach((f) => notifySaveToAlbum(f))
-                  } else {
-                    pendingProcessFiles.forEach((f) => downloadFile(f))
+              onDone={async () => {
+                if (finishingReceivedRef.current || pendingProcessFiles.length === 0) return
+                finishingReceivedRef.current = true
+                const files = [...pendingProcessFiles]
+                const action = receiveAction
+                try {
+                  if (action === 'album') {
+                    if (jsBridge.isNativeEmbedHost()) {
+                      await new Promise<void>((resolve) => {
+                        void notifySaveToAlbumBatch(files, () => resolve())
+                      })
+                    } else {
+                      files.forEach((f) => downloadFile(f))
+                    }
+                  } else if (action === 'chat') {
+                    await Promise.all(files.map((f) => notifyFileFlow(f)))
                   }
-                } else if (receiveAction === 'chat') {
-                  if (jsBridge.isNativeEmbedHost()) {
-                    pendingProcessFiles.forEach((f) => onReceivedFileInFlow(f))
-                  }
+                } finally {
+                  finishingReceivedRef.current = false
+                  setShowReceivedModal(false)
+                  setPendingProcessFiles([])
+                  setReceiveAction(null)
                 }
-                setPendingProcessFiles([])
-                setReceiveAction(null)
               }}
             />
           </div>

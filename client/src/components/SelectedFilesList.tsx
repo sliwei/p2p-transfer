@@ -1,12 +1,12 @@
 import { useCallback, useRef } from 'react'
 
-import { coverToImageSrc } from '../utils/app-drop-protocol'
+import { coverToImageSrc, getDropReceiveItemStash } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
 
 interface SelectedFilesListProps {
   files: File[]
   onFilesChange: (files: File[]) => void
-  onSelectMore: () => void
+  onSelectMore: () => void | Promise<void>
   onSendFiles: () => void
   canSend: boolean
   isSending: boolean
@@ -20,6 +20,12 @@ function isVideoFile(file: File): boolean {
 
 /** drop 协议在 File 上挂的 cover */
 function getDropCover(file: File): string | undefined {
+  const stash = getDropReceiveItemStash(file)
+  const fromStash = stash?.cover
+  if (typeof fromStash === 'string') {
+    const t = fromStash.trim()
+    if (t) return t
+  }
   const c = (file as File & { cover?: string }).cover?.trim()
   return c || undefined
 }
@@ -47,7 +53,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
 
   const handleSelectClick = () => {
     if (jsBridge.isNativeEmbedHost()) {
-      onSelectMore()
+      void Promise.resolve(onSelectMore()).catch((e) => console.error('[AppDrop] onSelectMore', e))
     } else {
       if (fileInputRef.current) {
         fileInputRef.current.click()

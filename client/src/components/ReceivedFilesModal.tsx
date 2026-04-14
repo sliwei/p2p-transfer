@@ -3,7 +3,7 @@ import type { ReceivedFile } from '../hooks/useWebRTC'
 interface ReceivedFilesModalProps {
   files: ReceivedFile[]
   onClose: () => void
-  onDone: () => void
+  onDone: () => void | Promise<void>
 }
 
 export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, onClose, onDone }) => {

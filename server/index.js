@@ -80,6 +80,9 @@ const rtcConfig = loadRtcConfig();
 
 const app = express();
 app.use(cors({ origin: true }));
+app.get('/health', (req, res) => {
+  res.status(200).type('text/plain').send('ok');
+});
 app.get('/rtc-config', (req, res) => {
   res.json(rtcConfig);
 });
@@ -265,12 +268,30 @@ io.on('connection', (socket) => {
 });
 
 const clientDist = process.env.CLIENT_DIST;
+/** 避免缺失的静态资源被 SPA 回退成 index.html（否则模块脚本会得到 text/html） */
+const STATIC_EXT_NO_SPA_FALLBACK =
+  /\.(js|mjs|cjs|css|map|json|ico|svg|png|jpe?g|gif|webp|woff2?|ttf|eot|txt|wasm)(\?.*)?$/i;
+const CACHE_HTML = 'no-cache, no-store, must-revalidate';
+const CACHE_ASSET_HASHED = 'public, max-age=31536000, immutable';
+
 if (clientDist && fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  app.use(
+    express.static(clientDist, {
+      setHeaders(res, filePath) {
+        if (path.basename(filePath) === 'index.html') {
+          res.setHeader('Cache-Control', CACHE_HTML);
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader('Cache-Control', CACHE_ASSET_HASHED);
+        }
+      },
+    })
+  );
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/socket.io')) return next();
+    if (STATIC_EXT_NO_SPA_FALLBACK.test(req.path)) return next();
     const indexHtml = path.join(clientDist, 'index.html');
     if (!fs.existsSync(indexHtml)) return next();
+    res.setHeader('Cache-Control', CACHE_HTML);
     res.sendFile(indexHtml);
   });
   slog('[Server] Serving static from', clientDist);

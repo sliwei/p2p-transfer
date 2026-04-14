@@ -22,7 +22,7 @@ async function urlToBlob(url: string): Promise<Blob> {
   return res.blob()
 }
 
-/** 单文件描述（APP 侧常用字段） */
+/** 单文件描述（APP 侧常用字段；实际可含任意自定义键） */
 export interface DropReceiveFileItem {
   name?: string
   fileName?: string
@@ -41,38 +41,56 @@ export interface DropReceiveFileItem {
   messageId?: string
   /** 封面图：非空时列表预览优先用（data URL / http(s) / 纯 base64 均可） */
   cover?: string
+  [key: string]: unknown
 }
 
 /** 带可选 cover 的 File（dropReceiveFile 协议解析结果） */
 export type DropReceiveFile = File & { cover?: string }
 
-function attachCover(file: File, item: DropReceiveFileItem): DropReceiveFile {
-  const raw = item.cover
-  if (raw == null) return file as DropReceiveFile
-  const cover = typeof raw === 'string' ? raw.trim() : ''
-  if (!cover) return file as DropReceiveFile
-  return Object.assign(file, { cover }) as DropReceiveFile
+/** 与 File 配对保存 dropReceiveFile 原始条目（除体积字段外原样回传） */
+const dropReceiveItemStashByFile = new WeakMap<File, Record<string, unknown>>()
+
+/** 仅排除由 Blob 单独承载的字段，其余键（含宿主自定义）全部暂存 */
+const STASH_OMIT_KEYS = new Set(['data', 'base64'])
+
+function rememberDropReceiveItem(file: File, item: Record<string, unknown>): void {
+  const stash: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(item)) {
+    if (v === undefined) continue
+    if (STASH_OMIT_KEYS.has(k)) continue
+    stash[k] = v
+  }
+  dropReceiveItemStashByFile.set(file, stash)
+}
+
+/** 供 UI 等读取：来自 dropReceiveFile 的条目快照（未含 data/base64） */
+export function getDropReceiveItemStash(file: File): Readonly<Record<string, unknown>> | undefined {
+  return dropReceiveItemStashByFile.get(file)
 }
 
 function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
   const name = item.name ?? item.fileName ?? 'file'
   const mime = item.mime ?? item.type ?? item.mimeType ?? 'application/octet-stream'
 
+  const finish = (file: File): DropReceiveFile => {
+    rememberDropReceiveItem(file, item as Record<string, unknown>)
+    return file as DropReceiveFile
+  }
+
   if (item.data && typeof item.data === 'string') {
-     
     const base64 = stripDataUrlToBase64(item.data)
     const blob = base64ToBlob(base64, mime)
-    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
+    return Promise.resolve(finish(new File([blob], name, { type: mime })))
   }
 
   if (item.base64 && typeof item.base64 === 'string') {
     const blob = base64ToBlob(item.base64, mime)
-    return Promise.resolve(attachCover(new File([blob], name, { type: mime }), item))
+    return Promise.resolve(finish(new File([blob], name, { type: mime })))
   }
 
   if (item.url && typeof item.url === 'string') {
     return urlToBlob(item.url).then((blob) =>
-      attachCover(new File([blob], name, { type: item.type || blob.type || mime }), item)
+      finish(new File([blob], name, { type: item.type || blob.type || mime }))
     )
   }
 
@@ -125,14 +143,8 @@ export async function filesFromDropReceivePayload(data: unknown): Promise<DropRe
   throw new Error('dropReceiveFile: 缺少 items / files / file / data / base64 / url')
 }
 
-export interface DropAppItem {
-  name?: string
-  kind?: string
-  mime?: string
-  data?: string
-  url?: string
-  messageId?: string
-}
+/** H5 → APP 单条：结构同 dropReceiveFile 条目，键集不固定 */
+export type DropAppItem = Record<string, unknown>
 
 export interface DropAppPayload {
   items: DropAppItem[]
@@ -145,6 +157,33 @@ export function blobToBase64DataUrl(blob: Blob): Promise<string> {
     r.onerror = () => reject(r.error)
     r.readAsDataURL(blob)
   })
+}
+
+/** 将 H5 已选 File[] 转为发给 APP 的 drop 载荷（dropReceiveFile 条目中除 data/base64 外原样带回，并刷新 data/name/size） */
+export async function filesToDropAppPayload(files: File[]): Promise<DropAppPayload> {
+  const items = await Promise.all(
+    files.map(async (file) => {
+      const dataUrl = await blobToBase64DataUrl(file)
+      const blobMime = file.type || 'application/octet-stream'
+      const stashed: Record<string, unknown> = { ...(dropReceiveItemStashByFile.get(file) ?? {}) }
+
+      const item: DropAppItem = {
+        ...stashed,
+        name: file.name,
+        size: file.size,
+        data: dataUrl
+      }
+
+      if (item.mime == null || item.mime === '') item.mime = blobMime || 'application/octet-stream'
+      if (item.kind == null || item.kind === '') {
+        const m = (typeof item.mime === 'string' && item.mime !== '' ? item.mime : blobMime) || 'application/octet-stream'
+        item.kind = m.startsWith('video') ? 'video' : m.startsWith('image') ? 'image' : 'file'
+      }
+
+      return item
+    })
+  )
+  return { items }
 }
 
 /** 从 data URL 拆出纯 base64 */
