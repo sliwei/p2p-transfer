@@ -22,7 +22,17 @@ export const BottomInstructions: React.FC<BottomInstructionsProps> = ({ roomLink
     <div className="w-full px-2 py-2 flex gap-4 items-start">
       <div className="flex flex-col items-center shrink-0">
         <div className="w-24 h-24 bg-white p-1 rounded-lg border border-[#E5E5E5] flex items-center justify-center">
-          <QRCodeSVG value={roomLink} size={88} />
+          <QRCodeSVG
+            value={roomLink}
+            size={88}
+            level="H"
+            imageSettings={{
+              src: '/favicon.png',
+              height: 22,
+              width: 22,
+              excavate: true,
+            }}
+          />
         </div>
         <span className="text-[12px] text-[#999999] mt-2">maliang.com</span>
         <button
