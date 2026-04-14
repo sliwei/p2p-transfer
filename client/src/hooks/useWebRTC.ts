@@ -2,7 +2,7 @@ import { generateCuteNickname } from 'cute-nickname'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
-import { triggerBrowserDownload } from '../utils/triggerDownload'
+import { triggerBrowserDownload, triggerBrowserDownloads } from '../utils/triggerDownload'
 
 /** 本机开发：信令与 rtc-config 统一走 127.0.0.1:3001（IPv4），避免 localhost 解析到 ::1 与 WebRTC 的 127.0.0.1 host 候选混用；并与仅用「局域网 IP 打开页面」时的行为区分。 */
 function getSignalingOrigin(): string {
@@ -1512,9 +1512,21 @@ export function useWebRTC(roomId: string | null) {
 
   const downloadFile = useCallback((file: ReceivedFile) => {
     try {
-      triggerBrowserDownload(file.blob, file.name)
+      triggerBrowserDownload(file.blob, file.name, file.type)
     } catch (e) {
       console.error('[WebRTC] downloadFile 失败:', e)
+    }
+  }, [])
+
+  const downloadReceivedFiles = useCallback((files: ReceivedFile[]) => {
+    try {
+      if (files.length === 0) return
+      triggerBrowserDownloads(
+        files.map((f) => ({ blob: f.blob, filename: f.name, mimeHint: f.type })),
+        { albumOriented: true }
+      )
+    } catch (e) {
+      console.error('[WebRTC] downloadReceivedFiles 失败:', e)
     }
   }, [])
 
@@ -1558,6 +1570,7 @@ export function useWebRTC(roomId: string | null) {
     outgoingTransferHint,
     respondToTransferRequest,
     downloadFile,
+    downloadReceivedFiles,
     receivedModalPayload,
     acknowledgeReceivedModal,
     transferBatchTotalBytesByPeer

@@ -208,14 +208,11 @@ class JsBridge {
   }
 
   /**
-   * 检查是否在iOS WebView环境中
+   * 是否在公司 App内嵌 WebView中：仅当 UA 包含标识串 ArtAiClass。
+   * 方法名沿用历史；不限于 iOS。
    */
   isIOSWebView(): boolean {
-    // 优先检查 WebViewJavascriptBridge 是否存在
-    if (this.window.WebViewJavascriptBridge) {
-      return true
-    }
-    return false
+    return typeof navigator !== 'undefined' && navigator.userAgent.includes('ArtAiClass')
   }
 
   /**

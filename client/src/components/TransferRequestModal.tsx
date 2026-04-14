@@ -16,7 +16,7 @@ export function TransferRequestModal({
   onReject
 }: TransferRequestModalProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center overscroll-none">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center overscroll-none">
       <div className="absolute inset-0 bg-black/40" aria-hidden />
       <div className="relative z-10 bg-white rounded-3xl w-[320px] p-6 flex flex-col items-center">
         {/* Header */}
