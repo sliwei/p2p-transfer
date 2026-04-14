@@ -42,29 +42,53 @@ export function readDisplayNameFromUrl(): string {
 
 const SESSION_RANDOM_CN_NICKNAME_KEY = 'p2p_transfer_session_cn_nickname'
 
+/** 展示名最大长度（与信令、UI 一致） */
+export const DISPLAY_NAME_MAX_LEN = 20
+
 /**
- * 展示名：地址栏 `name` 优先；否则会话内固定一条 cute-nickname 生成的中文昵称（刷新不丢，关标签后重开再生成）
+ * 展示名：地址栏 `name` 优先；否则本地持久化一条 cute-nickname 生成的中文昵称（localStorage，跨会话不变）
  */
 export function getEffectiveDisplayName(): string {
-  const fromUrl = readDisplayNameFromUrl().trim().slice(0, 64)
+  const fromUrl = readDisplayNameFromUrl().trim().slice(0, DISPLAY_NAME_MAX_LEN)
   if (fromUrl) return fromUrl
   try {
-    const cached = sessionStorage.getItem(SESSION_RANDOM_CN_NICKNAME_KEY)?.trim()
-    if (cached) return cached.slice(0, 64)
+    const fromLocal = localStorage.getItem(SESSION_RANDOM_CN_NICKNAME_KEY)?.trim()
+    if (fromLocal) return fromLocal.slice(0, DISPLAY_NAME_MAX_LEN)
+    const legacy = sessionStorage.getItem(SESSION_RANDOM_CN_NICKNAME_KEY)?.trim()
+    if (legacy) {
+      localStorage.setItem(SESSION_RANDOM_CN_NICKNAME_KEY, legacy.slice(0, DISPLAY_NAME_MAX_LEN))
+      try {
+        sessionStorage.removeItem(SESSION_RANDOM_CN_NICKNAME_KEY)
+      } catch {
+        /* ignore */
+      }
+      return legacy.slice(0, DISPLAY_NAME_MAX_LEN)
+    }
   } catch {
     /* ignore */
   }
-  let created = generateCuteNickname({ withEmoji: false })
-  created = created.trim().slice(0, 64)
+  let created = generateCuteNickname({ withEmoji: true, allowReduplication: true })
+  created = created.trim().slice(0, DISPLAY_NAME_MAX_LEN)
   if (!created) {
     created = '访客'
   }
   try {
-    sessionStorage.setItem(SESSION_RANDOM_CN_NICKNAME_KEY, created)
+    localStorage.setItem(SESSION_RANDOM_CN_NICKNAME_KEY, created)
   } catch {
     /* ignore */
   }
   return created
+}
+
+/** 用户改昵称时写入本地（无 URL `name` 时与 getEffectiveDisplayName 同源） */
+export function persistRandomCnNickname(name: string) {
+  const n = name.trim().slice(0, DISPLAY_NAME_MAX_LEN)
+  if (!n || readDisplayNameFromUrl().trim()) return
+  try {
+    localStorage.setItem(SESSION_RANDOM_CN_NICKNAME_KEY, n)
+  } catch {
+    /* ignore */
+  }
 }
 
 const SIGNALING_SERVER = getSignalingOrigin()
@@ -301,6 +325,10 @@ export type OutgoingTransferHint = 'waiting' | 'rejected' | 'completed'
 export function useWebRTC(roomId: string | null) {
   const [myPeerId, setMyPeerId] = useState<string>('')
   const [myPeerName, setMyPeerName] = useState<string>(() => getEffectiveDisplayName())
+  const myPeerNameRef = useRef(myPeerName)
+  useEffect(() => {
+    myPeerNameRef.current = myPeerName
+  }, [myPeerName])
   const [myDeviceType, setMyDeviceType] = useState<string>('')
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map())
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map())
@@ -332,7 +360,7 @@ export function useWebRTC(roomId: string | null) {
     if (!roomId) return
     const fromUrl = readDisplayNameFromUrl().trim()
     if (fromUrl) {
-      setMyPeerName(fromUrl.slice(0, 64))
+      setMyPeerName(fromUrl.slice(0, DISPLAY_NAME_MAX_LEN))
       return
     }
     setMyPeerName(getEffectiveDisplayName())
@@ -388,7 +416,7 @@ export function useWebRTC(roomId: string | null) {
   const peerDeviceTypesRef = useRef<Map<string, string>>(new Map())
 
   const applyRemoteDisplayName = useCallback((peerId: string, displayName: string) => {
-    const trimmed = displayName.trim().slice(0, 64)
+    const trimmed = displayName.trim().slice(0, DISPLAY_NAME_MAX_LEN)
     if (!trimmed) return
     peerDisplayNamesRef.current.set(peerId, trimmed)
     const p = peersRef.current.get(peerId)
@@ -745,7 +773,8 @@ export function useWebRTC(roomId: string | null) {
           peerInRef.iceTransportDetail = undefined
         }
         try {
-          const label = getEffectiveDisplayName()
+          const fromUrl = readDisplayNameFromUrl().trim().slice(0, DISPLAY_NAME_MAX_LEN)
+          const label = (fromUrl || myPeerNameRef.current.trim()).slice(0, DISPLAY_NAME_MAX_LEN) || getEffectiveDisplayName()
           if (label && dataChannel.readyState === 'open') {
             dataChannel.send(JSON.stringify({ type: 'peer-display', displayName: label }))
           }
@@ -1072,9 +1101,9 @@ export function useWebRTC(roomId: string | null) {
           setMyPeerId(peerId)
           setMyPeerName((prev) => {
             const fromUrl = readDisplayNameFromUrl().trim()
-            if (fromUrl) return fromUrl.slice(0, 64)
+            if (fromUrl) return fromUrl.slice(0, DISPLAY_NAME_MAX_LEN)
             const serverName = typeof name === 'string' ? name.trim() : ''
-            if (serverName) return serverName.slice(0, 64)
+            if (serverName) return serverName.slice(0, DISPLAY_NAME_MAX_LEN)
             return prev || getEffectiveDisplayName()
           })
           if (deviceType) setMyDeviceType(deviceType)
@@ -1132,6 +1161,14 @@ export function useWebRTC(roomId: string | null) {
         if (shouldInitiate) {
           createPeerConnection(joinedPeerId, true)
         }
+      })
+
+      newSocket.on('peer-renamed', (payload: unknown) => {
+        if (!payload || typeof payload !== 'object' || !('peerId' in payload)) return
+        const o = payload as { peerId: string; displayName?: string }
+        if (typeof o.peerId !== 'string') return
+        const dn = typeof o.displayName === 'string' ? o.displayName : ''
+        if (dn) applyRemoteDisplayName(o.peerId, dn)
       })
 
       newSocket.on('peer-left', (peerId: string) => {
@@ -1481,11 +1518,34 @@ export function useWebRTC(roomId: string | null) {
     }
   }, [])
 
+  const setMyDisplayName = useCallback((raw: string) => {
+    const trimmed = raw.trim().slice(0, DISPLAY_NAME_MAX_LEN)
+    const finalName = trimmed || '访客'
+    setMyPeerName(finalName)
+    myPeerNameRef.current = finalName
+    persistRandomCnNickname(finalName)
+    const sock = socketRef.current
+    if (sock?.connected) {
+      sock.emit('update-display-name', finalName)
+    }
+    for (const [, p] of peersRef.current) {
+      const dc = p.dataChannel
+      if (dc?.readyState === 'open') {
+        try {
+          dc.send(JSON.stringify({ type: 'peer-display', displayName: finalName }))
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }, [])
+
   const p2pFileTransferReady = Array.from(peers.values()).some((p) => p.dataChannel?.readyState === 'open')
 
   return {
     myPeerId,
     myPeerName,
+    setMyDisplayName,
     myDeviceType,
     peers: Array.from(peers.values()),
     transfers: Array.from(transfers.values()),

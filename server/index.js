@@ -104,6 +104,7 @@ const io = new Server(httpServer, {
 
 // Room management：roomId -> Map<stablePeerId, { displayName, deviceName }>（deviceName 由 UA 解析，同 PairDrop）
 const rooms = new Map();
+const DISPLAY_NAME_MAX_LEN = 20;
 
 /** 首参 string 兼容旧客户端；第二参为地址栏展示名；或单参 { roomId, displayName } */
 function parseJoinRoomPayload(payload, displayNameArg) {
@@ -111,7 +112,7 @@ function parseJoinRoomPayload(payload, displayNameArg) {
     const roomId = payload.trim();
     if (!roomId) return null;
     const displayName =
-      typeof displayNameArg === 'string' ? displayNameArg.trim().slice(0, 64) : '';
+      typeof displayNameArg === 'string' ? displayNameArg.trim().slice(0, DISPLAY_NAME_MAX_LEN) : '';
     return { roomId, displayName };
   }
   if (payload && typeof payload === 'object' && typeof payload.roomId === 'string') {
@@ -119,9 +120,9 @@ function parseJoinRoomPayload(payload, displayNameArg) {
     if (!roomId) return null;
     let displayName = '';
     if (typeof payload.displayName === 'string') {
-      displayName = payload.displayName.trim().slice(0, 64);
+      displayName = payload.displayName.trim().slice(0, DISPLAY_NAME_MAX_LEN);
     } else if (typeof displayNameArg === 'string') {
-      displayName = displayNameArg.trim().slice(0, 64);
+      displayName = displayNameArg.trim().slice(0, DISPLAY_NAME_MAX_LEN);
     }
     return { roomId, displayName };
   }
@@ -228,6 +229,22 @@ io.on('connection', (socket) => {
       displayName: displayName || '',
       deviceType: socket.data.deviceName || '',
     });
+  });
+
+  socket.on('update-display-name', (displayName) => {
+    const name =
+      typeof displayName === 'string' ? displayName.trim().slice(0, DISPLAY_NAME_MAX_LEN) : '';
+    if (!name) return;
+    for (const [roomId, roomMap] of rooms.entries()) {
+      if (!roomMap.has(stablePeerId)) continue;
+      const meta = roomMap.get(stablePeerId);
+      meta.displayName = name;
+      socket.to(roomId).emit('peer-renamed', {
+        peerId: stablePeerId,
+        displayName: name,
+      });
+      break;
+    }
   });
 
   socket.on('offer', ({ targetId, offer }) => {

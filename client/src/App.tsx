@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { BottomInstructions } from './components/BottomInstructions'
 import { RadarCanvas } from './components/RadarCanvas'
@@ -9,7 +9,7 @@ import { SelectedFilesList } from './components/SelectedFilesList'
 import { TransferRequestModal } from './components/TransferRequestModal'
 import { useAppDropEmbed } from './hooks/useAppDropEmbed'
 import { useRoom } from './hooks/useRoom'
-import { type ReceivedFile, useWebRTC } from './hooks/useWebRTC'
+import { DISPLAY_NAME_MAX_LEN, type ReceivedFile, useWebRTC } from './hooks/useWebRTC'
 import jsBridge from './utils/js-bridge'
 import { buildRoomShareUrl } from './utils/roomLink'
 
@@ -30,6 +30,7 @@ function App() {
     downloadFile,
     myPeerId,
     myPeerName,
+    setMyDisplayName,
     receivedModalPayload,
     acknowledgeReceivedModal,
     transferBatchTotalBytesByPeer
@@ -64,6 +65,53 @@ function App() {
   }, [isSending, selectedPeers, readyPeerIds])
 
   const [showReceivedModal, setShowReceivedModal] = useState(false)
+
+  const [nickEditing, setNickEditing] = useState(false)
+  const nickEscapeRef = useRef(false)
+  const beforeEditNickRef = useRef('')
+  const nickElRef = useRef<HTMLSpanElement>(null)
+  const displayNick = myPeerName || myPeerId.slice(0, 4)
+
+  const startNickEdit = useCallback(() => {
+    nickEscapeRef.current = false
+    beforeEditNickRef.current = displayNick
+    setNickEditing(true)
+  }, [displayNick])
+
+  useLayoutEffect(() => {
+    if (!nickEditing) return
+    const el = nickElRef.current
+    if (!el) return
+    el.textContent = beforeEditNickRef.current
+    el.focus()
+    const sel = window.getSelection()
+    if (!sel) return
+    const range = document.createRange()
+    if (el.childNodes.length === 0) {
+      range.setStart(el, 0)
+    } else {
+      range.selectNodeContents(el)
+    }
+    range.collapse(false)
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }, [nickEditing])
+
+  const clampNickEditableLength = useCallback(() => {
+    const el = nickElRef.current
+    if (!el) return
+    let t = el.innerText.replace(/\r?\n/g, '')
+    if (t.length > DISPLAY_NAME_MAX_LEN) {
+      t = t.slice(0, DISPLAY_NAME_MAX_LEN)
+      el.textContent = t
+      const range = document.createRange()
+      range.setStart(el.firstChild ?? el, t.length)
+      range.collapse(true)
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+    }
+  }, [])
 
   const [receiveAction, setReceiveAction] = useState<'album' | 'chat' | null>(null)
   const [pendingProcessFiles, setPendingProcessFiles] = useState<ReceivedFile[]>([])
@@ -112,7 +160,7 @@ function App() {
     <div className="relative h-full min-h-[100dvh] w-full overflow-hidden overscroll-none bg-white font-sans">
       <RadarCanvas animate={readyPeers.length === 0} />
 
-      <div className="fixed left-1/2 top-[62%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-0">
+      <div className="fixed left-1/2 top-[62%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-20">
         <div className="w-14 h-14 rounded-full flex items-center justify-center mb-2">
           <svg className="w-[100px] h-[100px]" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="7311">
             <path d="M460.8 511.880533a51.080533 51.080533 0 1 0 102.161067 0 51.080533 51.080533 0 0 0-102.161067 0z" p-id="7312" fill="#2266FF"></path>
@@ -133,7 +181,63 @@ function App() {
             ></path>
           </svg>
         </div>
-        <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-1 rounded-full">{myPeerName || myPeerId.slice(0, 4)}</span>
+        <div className="pointer-events-auto">
+          <span
+            ref={nickElRef}
+            role={nickEditing ? 'textbox' : 'button'}
+            tabIndex={0}
+            aria-label="我的昵称，点击编辑"
+            title="点击编辑昵称"
+            suppressContentEditableWarning
+            contentEditable={nickEditing}
+            className={
+              'inline-block min-w-[4ch] max-w-[min(72vw,240px)] text-center text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-1 rounded-full outline-none align-middle ' +
+              (nickEditing ? 'cursor-text ring-2 ring-[#2266FF]/40' : 'cursor-pointer truncate')
+            }
+            onClick={() => {
+              if (!nickEditing) startNickEdit()
+            }}
+            onInput={nickEditing ? clampNickEditableLength : undefined}
+            onPaste={(e) => {
+              if (!nickEditing) return
+              e.preventDefault()
+              const plain = e.clipboardData.getData('text/plain').replace(/\r?\n/g, '')
+              document.execCommand('insertText', false, plain)
+              clampNickEditableLength()
+            }}
+            onBlur={() => {
+              if (!nickEditing) return
+              if (nickEscapeRef.current) {
+                nickEscapeRef.current = false
+                return
+              }
+              const raw = nickElRef.current?.innerText ?? ''
+              setMyDisplayName(raw.replace(/\r?\n/g, ''))
+              setNickEditing(false)
+            }}
+            onKeyDown={(e) => {
+              if (!nickEditing) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  startNickEdit()
+                }
+                return
+              }
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                nickElRef.current?.blur()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                nickEscapeRef.current = true
+                const el = nickElRef.current
+                if (el) el.textContent = beforeEditNickRef.current
+                setNickEditing(false)
+              }
+            }}
+          >
+            {nickEditing ? null : displayNick}
+          </span>
+        </div>
       </div>
 
       {/* fixed 子项不参与可靠高度分配：用 absolute 铺满父级，flex-1 才有确定高度（Android WebView） */}
