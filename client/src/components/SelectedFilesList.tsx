@@ -1,7 +1,17 @@
 import { useCallback, useRef } from 'react'
+import { toast } from 'sonner'
 
 import { coverToImageSrc, getDropReceiveItemStash } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
+import {
+  isImageOrVideo,
+  isVideoFile,
+  MAX_SELECTED_FILES,
+  MAX_SELECTED_TOTAL_BYTES,
+  mergeFeedbackMessage,
+  mergeIntoSelectedFiles,
+  sumSelectedFilesBytes,
+} from '../utils/selected-files-policy'
 
 interface SelectedFilesListProps {
   files: File[]
@@ -12,10 +22,18 @@ interface SelectedFilesListProps {
   isSending: boolean
 }
 
-function isVideoFile(file: File): boolean {
-  if (file.type.startsWith('video/')) return true
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-  return /^(mp4|mov|webm|mkv|avi|m4v|3gp|ogv)$/i.test(ext)
+/** 人类可读大小，如 20 kb / 2 Mb / 1.5 Gb */
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes === 0) return '0 kb'
+  const kb = 1024
+  const mb = kb * 1024
+  const gb = mb * 1024
+  const fmt = (n: number) => (n >= 10 || Number.isInteger(n) ? String(Math.round(n)) : n.toFixed(1))
+  if (bytes < kb) return `${bytes} B`
+  if (bytes < mb) return `${fmt(bytes / kb)} kb`
+  if (bytes < gb) return `${fmt(bytes / mb)} Mb`
+  return `${fmt(bytes / gb)} Gb`
 }
 
 /** drop 协议在 File 上挂的 cover */
@@ -39,11 +57,11 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const next = e.target.files ? Array.from(e.target.files) : []
-      if (next.length > 0) {
-        onFilesChange([...files, ...next])
-      }
-      // Reset input value so the same file can be selected again
+      const picked = e.target.files ? Array.from(e.target.files) : []
+      const r = mergeIntoSelectedFiles(files, picked, isImageOrVideo)
+      const msg = mergeFeedbackMessage(r)
+      if (msg) queueMicrotask(() => toast.warning(msg))
+      if (r.next !== files) onFilesChange(r.next)
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
       }
@@ -52,12 +70,18 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   )
 
   const handleSelectClick = () => {
+    if (sumSelectedFilesBytes(files) >= MAX_SELECTED_TOTAL_BYTES) {
+      toast.warning(`列表总大小已达 ${MAX_SELECTED_TOTAL_BYTES / 1024 / 1024}MB 上限，无法继续添加`)
+      return
+    }
+    if (files.length >= MAX_SELECTED_FILES) {
+      toast.warning(`已达上限（最多 ${MAX_SELECTED_FILES} 个文件），无法继续添加`)
+      return
+    }
     if (jsBridge.isNativeEmbedHost()) {
       void Promise.resolve(onSelectMore()).catch((e) => console.error('[AppDrop] onSelectMore', e))
     } else {
-      if (fileInputRef.current) {
-        fileInputRef.current.click()
-      }
+      fileInputRef.current?.click()
     }
   }
 
@@ -75,9 +99,17 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   return (
     <div className="w-full px-4 py-3">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[17px] font-medium text-[#333333]">选择{files.length}个文件</h2>
+        <h2 className="text-[17px] font-medium text-[#333333]">
+          选择{files.length}/{MAX_SELECTED_FILES}个文件
+          <span className="ml-1.5 text-[14px] font-normal text-[#888888]">（共 {formatFileSize(sumSelectedFilesBytes(files))}）</span>
+        </h2>
         <div className="flex items-center gap-4">
-          <button onClick={handleSelectClick} className="text-[15px] text-[#0066FF] flex items-center">
+          <button
+            type="button"
+            onClick={handleSelectClick}
+            disabled={files.length >= MAX_SELECTED_FILES || sumSelectedFilesBytes(files) >= MAX_SELECTED_TOTAL_BYTES}
+            className="flex items-center text-[15px] text-[#0066FF] disabled:cursor-not-allowed disabled:opacity-40"
+          >
             {files.length > 0 ? '继续选择' : '添加文件'}
             <svg className="w-4 h-4 ml-1" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="8393">
               <path
@@ -98,7 +130,14 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
             </button>
           )}
         </div>
-        <input type="file" ref={fileInputRef} multiple onChange={handleFileInput} className="hidden" />
+        <input
+          type="file"
+          ref={fileInputRef}
+          multiple
+          accept="image/*,video/*"
+          onChange={handleFileInput}
+          className="hidden"
+        />
       </div>
 
       {files.length > 0 ? (
@@ -107,33 +146,38 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
             const previewUrl = getFilePreview(file)
             const showVideoBadgeOnCover = Boolean(getDropCover(file) && previewUrl && isVideoFile(file))
             return (
-              <div key={`${file.name}-${index}`} className="relative flex-shrink-0 w-[100px] h-[128px] rounded-[10px] bg-[#E6E5F7] overflow-visible">
-                {previewUrl ? (
-                  <div className="relative w-full h-full rounded-[10px] overflow-hidden">
-                    <img src={previewUrl} alt={file.name} className="w-full h-full object-contain" />
-                    {showVideoBadgeOnCover && (
-                      <div
-                        className="absolute bottom-1.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full bg-black/50 text-white shadow-sm pointer-events-none"
-                        aria-hidden
-                      >
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                          <path d="M8 5v14l11-7L8 5z" />
-                        </svg>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 break-all p-2 text-center">
-                    <span className="font-medium text-sm text-[#333333] mb-1">{file.name.split('.').pop()?.toUpperCase()}</span>
-                    <span className="text-[10px] opacity-70 line-clamp-2">{file.name}</span>
-                  </div>
-                )}
-                <button
-                  onClick={() => handleRemove(index)}
-                  className="absolute -top-2 -right-2 w-6 h-6 bg-[#FF3B30] rounded-full flex items-center justify-center text-white text-xs border-2 border-white shadow-sm"
-                >
-                  ×
-                </button>
+              <div key={`${file.name}-${index}`} className="flex w-[100px] flex-shrink-0 flex-col overflow-visible">
+                <div className="relative h-[128px] w-full rounded-[10px] bg-[#E6E5F7] overflow-visible">
+                  {previewUrl ? (
+                    <div className="relative h-full w-full rounded-[10px] overflow-hidden">
+                      <img src={previewUrl} alt={file.name} className="h-full w-full object-contain" />
+                      {showVideoBadgeOnCover && (
+                        <div
+                          className="absolute bottom-1.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full bg-black/50 text-white shadow-sm pointer-events-none"
+                          aria-hidden
+                        >
+                          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                            <path d="M8 5v14l11-7L8 5z" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center break-all p-2 text-center text-xs text-gray-400">
+                      <span className="mb-1 text-sm font-medium text-[#333333]">{file.name.split('.').pop()?.toUpperCase()}</span>
+                      <span className="line-clamp-2 text-[10px] opacity-70">{file.name}</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(index)}
+                    className="absolute -top-2 -right-2 flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-[#FF3B30] text-xs text-white shadow-sm"
+                    aria-label={`移除 ${file.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+                <p className="mt-1 text-center text-[10px] leading-tight text-[#666666]">{formatFileSize(file.size)}</p>
               </div>
             )
           })}

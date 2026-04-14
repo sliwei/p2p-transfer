@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import { BottomInstructions } from './components/BottomInstructions'
 import { RadarCanvas } from './components/RadarCanvas'
@@ -12,6 +13,7 @@ import { useRoom } from './hooks/useRoom'
 import { DISPLAY_NAME_MAX_LEN, type ReceivedFile, useWebRTC } from './hooks/useWebRTC'
 import jsBridge from './utils/js-bridge'
 import { buildRoomShareUrl } from './utils/roomLink'
+import { isImageOrVideo, mergeFeedbackMessage, mergeIntoSelectedFiles } from './utils/selected-files-policy'
 import { shouldStepwiseAlbumSaveInBrowser } from './utils/triggerDownload'
 
 function App() {
@@ -129,7 +131,12 @@ function App() {
       console.warn('[AppDrop] 请先加入房间后再接收来自 APP 的文件')
       return
     }
-    setSelectedFiles((prev) => [...prev, ...files])
+    setSelectedFiles((prev) => {
+      const r = mergeIntoSelectedFiles(prev, files, isImageOrVideo)
+      const msg = mergeFeedbackMessage(r)
+      if (msg) queueMicrotask(() => toast.warning(msg))
+      return r.next
+    })
   }, [])
 
   const { notifySelectFile, notifyFileFlow, notifySaveToAlbumBatch } = useAppDropEmbed({
