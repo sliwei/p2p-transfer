@@ -15,6 +15,8 @@ interface RadarViewProps {
   selectedPeers: string[]
   onTogglePeer: (id: string) => void
   transfers: TransferProgress[]
+  /** 当前批次全部文件总字节数（对端 id），与 transfer-request /本地发送列表一致，用作合并进度分母 */
+  transferBatchTotalBytesByPeer?: Record<string, number>
   /** 发送端：各对端上的等待 / 已拒绝 / 已完成（短时） */
   outgoingTransferHint?: Record<string, OutgoingTransferHint>
   /** 发送流程进行中时禁止改选，避免与等待确认状态不同步 */
@@ -94,17 +96,24 @@ function DeviceKindIcon({ kind }: { kind: ReturnType<typeof inferDeviceIconKind>
   }
 }
 
-export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTogglePeer, transfers, outgoingTransferHint, peerSelectionLocked = false }) => {
+export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTogglePeer, transfers, transferBatchTotalBytesByPeer = {}, outgoingTransferHint, peerSelectionLocked = false }) => {
   const readyPeers = useMemo(() => peers.filter((p) => p.status === 'connected'), [peers])
   /** 点击同一设备时递增 n，强制 remount 以重复播放果冻动画 */
   const [jellyPulse, setJellyPulse] = useState<{ id: string; n: number } | null>(null)
 
   const getProgress = (peerId: string) => {
-    const peerTransfers = transfers.filter((t) => t.targetPeerId === peerId && t.status === 'transferring')
+    const manifestTotal = transferBatchTotalBytesByPeer[peerId]
+    const peerTransfers = transfers.filter((t) => t.targetPeerId === peerId && (t.status === 'pending' || t.status === 'transferring' || t.status === 'completed'))
+    const doneBytes = peerTransfers.reduce((acc, t) => {
+      if (t.status === 'completed') return acc + t.fileSize
+      return acc + Math.min(t.sentBytes, t.fileSize)
+    }, 0)
+    if (manifestTotal != null && manifestTotal > 0) {
+      return Math.min(100, Math.round((doneBytes / manifestTotal) * 100))
+    }
     if (peerTransfers.length === 0) return null
     const total = peerTransfers.reduce((acc, t) => acc + t.fileSize, 0)
-    const transferred = peerTransfers.reduce((acc, t) => acc + t.sentBytes, 0)
-    return total > 0 ? Math.round((transferred / total) * 100) : 0
+    return total > 0 ? Math.round((doneBytes / total) * 100) : 0
   }
 
   /** mb-pairdrop 卡片：`.name`=displayName（上一行），`.device-name`=deviceName（本行，UA 解析） */
@@ -114,7 +123,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
   }
 
   return (
-    <div className="w-full px-4 relative z-10 flex-1">
+    <div className="relative z-10 box-border flex h-full min-h-0 w-full flex-col px-4">
       <h3 className="text-[17px] font-medium text-[#333333] mb-4">已发现{readyPeers.length}个设备</h3>
 
       {/* Devices Row */}

@@ -20,7 +20,20 @@ function App() {
     roomIdRef.current = roomId
   }, [roomId])
 
-  const { peers, transfers, receivedFiles, sendFilesBatch, incomingRequests, outgoingTransferHint, respondToTransferRequest, downloadFile, myPeerId, myPeerName } = useWebRTC(roomId)
+  const {
+    peers,
+    transfers,
+    sendFilesBatch,
+    incomingRequests,
+    outgoingTransferHint,
+    respondToTransferRequest,
+    downloadFile,
+    myPeerId,
+    myPeerName,
+    receivedModalPayload,
+    acknowledgeReceivedModal,
+    transferBatchTotalBytesByPeer
+  } = useWebRTC(roomId)
 
   const roomLink = useMemo(() => buildRoomShareUrl(roomId ?? ''), [roomId])
 
@@ -51,8 +64,6 @@ function App() {
   }, [isSending, selectedPeers, readyPeerIds])
 
   const [showReceivedModal, setShowReceivedModal] = useState(false)
-  const prevReceivingCountRef = useRef(0)
-  const lastReceivedFilesRef = useRef<ReceivedFile[]>([])
 
   const [receiveAction, setReceiveAction] = useState<'album' | 'chat' | null>(null)
   const [pendingProcessFiles, setPendingProcessFiles] = useState<ReceivedFile[]>([])
@@ -75,21 +86,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const receivingTransfers = transfers.filter((t) => t.direction === 'receiving')
-    const isReceiving = receivingTransfers.some((t) => t.status === 'transferring')
-    const completedCount = receivingTransfers.filter((t) => t.status === 'completed').length
-
-    if (!isReceiving && completedCount > 0 && completedCount > prevReceivingCountRef.current) {
-      // Find the newly received files to show in the modal
-      const newFiles = receivedFiles.slice(lastReceivedFilesRef.current.length)
-      if (newFiles.length > 0) {
-        setPendingProcessFiles(newFiles)
-        setShowReceivedModal(true)
-      }
-      prevReceivingCountRef.current = completedCount
-      lastReceivedFilesRef.current = receivedFiles
-    }
-  }, [transfers, receivedFiles])
+    if (!receivedModalPayload?.length) return
+    setPendingProcessFiles(receivedModalPayload)
+    setShowReceivedModal(true)
+    acknowledgeReceivedModal()
+  }, [receivedModalPayload, acknowledgeReceivedModal])
   const handleSendFiles = async () => {
     if (selectedFiles.length === 0 || selectedPeersEffective.length === 0 || isSending) return
 
@@ -108,7 +109,7 @@ function App() {
   }
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 flex-col overflow-hidden overscroll-none bg-white font-sans">
+    <div className="relative h-full min-h-[100dvh] w-full overflow-hidden overscroll-none bg-white font-sans">
       <RadarCanvas animate={readyPeers.length === 0} />
 
       <div className="fixed left-1/2 top-[62%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-0">
@@ -135,8 +136,9 @@ function App() {
         <span className="text-[14px] font-medium text-[#333333] bg-[#F1F1F1] px-5 py-1 rounded-full">{myPeerName || myPeerId.slice(0, 4)}</span>
       </div>
 
-      <div className="relative z-10 flex min-h-0 flex-1 flex-col pointer-events-none">
-        <div className="pointer-events-auto">
+      {/* fixed 子项不参与可靠高度分配：用 absolute 铺满父级，flex-1 才有确定高度（Android WebView） */}
+      <div className="absolute inset-0 z-10 flex min-h-0 flex-col pointer-events-none pt-[env(safe-area-inset-top,0px)]">
+        <div className="pointer-events-auto shrink-0">
           <SelectedFilesList
             files={selectedFiles}
             onFilesChange={handleDropZoneFilesChange}
@@ -147,18 +149,19 @@ function App() {
           />
         </div>
 
-        <div className="flex-1 pointer-events-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pointer-events-auto">
           <RadarView
             peers={readyPeers}
             selectedPeers={selectedPeersEffective}
             onTogglePeer={handleTogglePeer}
             transfers={transfers}
+            transferBatchTotalBytesByPeer={transferBatchTotalBytesByPeer}
             outgoingTransferHint={outgoingTransferHint}
             peerSelectionLocked={isSending}
           />
         </div>
 
-        <div className="pointer-events-auto">
+        <div className="pointer-events-auto shrink-0 bg-white pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
           <BottomInstructions roomLink={roomLink} />
         </div>
 

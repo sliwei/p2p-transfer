@@ -305,11 +305,15 @@ export function useWebRTC(roomId: string | null) {
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map())
   const [transfers, setTransfers] = useState<Map<string, TransferProgress>>(new Map())
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([])
+  /** 本批接收完成后一次性交给 UI 弹窗（避免多文件间隙误判为「已全部收完」） */
+  const [receivedModalPayload, setReceivedModalPayload] = useState<ReceivedFile[] | null>(null)
   const [incomingRequests, setIncomingRequests] = useState<TransferRequest[]>([])
   /** 发送端：各对端设备上的传输提示（与 RadarView 展示同步） */
   const [outgoingTransferHint, setOutgoingTransferHint] = useState<Record<string, OutgoingTransferHint>>({})
   /** 信令（Socket）已加入房间；与 WebRTC 是否可传文件无关 */
   const [signalingInRoom, setSignalingInRoom] = useState(false)
+  /** 当前批次「全部文件」总字节数（对端 id → 总大小），供雷达合并进度分母 */
+  const [transferBatchTotalBytesByPeer, setTransferBatchTotalBytesByPeer] = useState<Record<string, number>>({})
 
   const updateOutgoingHint = useCallback((peerId: string, hint: OutgoingTransferHint | null) => {
     setOutgoingTransferHint((prev) => {
@@ -354,6 +358,9 @@ export function useWebRTC(roomId: string | null) {
   const receiveAssembleTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const fileMetadataRef = useRef<Map<string, { name: string; size: number; type: string; totalChunks: number; fromPeerId: string }>>(new Map())
   const pendingRequestsRef = useRef<Map<string, { peerId: string; resolve: () => void; reject: (reason: unknown) => void }>>(new Map())
+  const receivedFilesRef = useRef<ReceivedFile[]>([])
+  /** 与 transfer-request 对齐：收到几份 file-complete 后再弹窗 */
+  const incomingReceiveBatchRef = useRef<{ fromPeerId: string; total: number; completed: number; sliceStart: number } | null>(null)
 
   /** 对端断开 / DC 关闭 / 信令断开时立即结束「等待对方确认」，避免 sendFilesBatch 挂起导致 UI 一直「发送中」 */
   const rejectPendingTransferRequestsForPeer = (peerId: string, reason: Error) => {
@@ -406,6 +413,10 @@ export function useWebRTC(roomId: string | null) {
   useEffect(() => {
     transfersRef.current = transfers
   }, [transfers])
+
+  useEffect(() => {
+    receivedFilesRef.current = receivedFiles
+  }, [receivedFiles])
 
   useEffect(() => {
     refreshIcePathRef.current = (peerId: string) => {
@@ -488,7 +499,26 @@ export function useWebRTC(roomId: string | null) {
 
       clearReceiveAssembleTimer(fileId)
       orphanChunksRef.current.delete(fileId)
-      setReceivedFiles((prev) => [...prev, receivedFile])
+
+      const batch = incomingReceiveBatchRef.current
+      let modalSliceStart: number | null = null
+      if (batch && batch.fromPeerId === metadata.fromPeerId) {
+        batch.completed += 1
+        if (batch.completed >= batch.total) {
+          modalSliceStart = batch.sliceStart
+          incomingReceiveBatchRef.current = null
+        }
+      }
+
+      setReceivedFiles((prev) => {
+        const next = [...prev, receivedFile]
+        receivedFilesRef.current = next
+        if (modalSliceStart !== null) {
+          const start = modalSliceStart
+          queueMicrotask(() => setReceivedModalPayload(next.slice(start)))
+        }
+        return next
+      })
       setTransfers((prev) => {
         const updated = new Map(prev)
         const transfer = updated.get(fileId)
@@ -497,10 +527,29 @@ export function useWebRTC(roomId: string | null) {
           transfer.sentBytes = metadata.size
           updated.set(fileId, transfer)
         }
+        if (modalSliceStart !== null) {
+          const fromId = metadata.fromPeerId
+          const toRemove: string[] = []
+          for (const [id, t] of updated) {
+            if (t.direction === 'receiving' && t.targetPeerId === fromId) toRemove.push(id)
+          }
+          for (const id of toRemove) updated.delete(id)
+        }
         return updated
       })
       fileMetadataRef.current.delete(fileId)
       receivedChunksRef.current.delete(fileId)
+      if (modalSliceStart !== null) {
+        const fromId = metadata.fromPeerId
+        queueMicrotask(() => {
+          setTransferBatchTotalBytesByPeer((prev) => {
+            if (!(fromId in prev)) return prev
+            const n = { ...prev }
+            delete n[fromId]
+            return n
+          })
+        })
+      }
       return 'completed'
     },
     [clearReceiveAssembleTimer]
@@ -662,6 +711,15 @@ export function useWebRTC(roomId: string | null) {
     pendingIceCandidatesRef.current.delete(peerId)
     peerDisplayNamesRef.current.delete(peerId)
     peerDeviceTypesRef.current.delete(peerId)
+    if (incomingReceiveBatchRef.current?.fromPeerId === peerId) {
+      incomingReceiveBatchRef.current = null
+    }
+    setTransferBatchTotalBytesByPeer((prev) => {
+      if (!(peerId in prev)) return prev
+      const n = { ...prev }
+      delete n[peerId]
+      return n
+    })
     setOutgoingTransferHint((prev) => {
       if (!(peerId in prev)) return prev
       const next = { ...prev }
@@ -1304,6 +1362,14 @@ export function useWebRTC(roomId: string | null) {
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
       const filesInfo = files.map((f) => ({ name: f.name, size: f.size }))
 
+      setTransfers((prev) => {
+        const u = new Map(prev)
+        for (const [id, t] of u) {
+          if (t.direction === 'sending' && t.targetPeerId === targetPeerId) u.delete(id)
+        }
+        return u
+      })
+
       // Send transfer request
       const requestMessage = {
         type: 'transfer-request',
@@ -1339,15 +1405,37 @@ export function useWebRTC(roomId: string | null) {
 
       updateOutgoingHint(targetPeerId, null)
 
-      for (const file of files) {
-        await sendFile(file, targetPeerId)
-      }
+      const batchTotalBytes = files.reduce((s, f) => s + f.size, 0)
+      setTransferBatchTotalBytesByPeer((prev) => ({ ...prev, [targetPeerId]: batchTotalBytes }))
 
-      updateOutgoingHint(targetPeerId, 'completed')
-      window.setTimeout(() => updateOutgoingHint(targetPeerId, null), 2000)
+      try {
+        for (const file of files) {
+          await sendFile(file, targetPeerId)
+        }
+        updateOutgoingHint(targetPeerId, 'completed')
+        window.setTimeout(() => updateOutgoingHint(targetPeerId, null), 2000)
+      } finally {
+        setTransfers((prev) => {
+          const u = new Map(prev)
+          for (const [id, t] of u) {
+            if (t.direction === 'sending' && t.targetPeerId === targetPeerId) u.delete(id)
+          }
+          return u
+        })
+        setTransferBatchTotalBytesByPeer((prev) => {
+          if (!(targetPeerId in prev)) return prev
+          const n = { ...prev }
+          delete n[targetPeerId]
+          return n
+        })
+      }
     },
     [sendFile, updateOutgoingHint]
   )
+
+  const acknowledgeReceivedModal = useCallback(() => {
+    setReceivedModalPayload(null)
+  }, [])
 
   const respondToTransferRequest = useCallback((requestId: string, accepted: boolean) => {
     setIncomingRequests((prev) => {
@@ -1362,6 +1450,23 @@ export function useWebRTC(roomId: string | null) {
               accepted
             })
           )
+        }
+        if (accepted) {
+          setTransfers((p) => {
+            const u = new Map(p)
+            for (const [id, t] of u) {
+              if (t.direction === 'receiving' && t.targetPeerId === request.fromPeerId) u.delete(id)
+            }
+            return u
+          })
+          const recvBatchBytes = request.filesInfo.reduce((s, info) => s + info.size, 0)
+          setTransferBatchTotalBytesByPeer((prev) => ({ ...prev, [request.fromPeerId]: recvBatchBytes }))
+          incomingReceiveBatchRef.current = {
+            fromPeerId: request.fromPeerId,
+            total: request.filesInfo.length,
+            completed: 0,
+            sliceStart: receivedFilesRef.current.length
+          }
         }
       }
       return prev.filter((r) => r.requestId !== requestId)
@@ -1392,6 +1497,9 @@ export function useWebRTC(roomId: string | null) {
     incomingRequests,
     outgoingTransferHint,
     respondToTransferRequest,
-    downloadFile
+    downloadFile,
+    receivedModalPayload,
+    acknowledgeReceivedModal,
+    transferBatchTotalBytesByPeer
   }
 }
