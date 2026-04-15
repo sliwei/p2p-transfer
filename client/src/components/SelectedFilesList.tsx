@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
-import { coverToImageSrc, getDropReceiveItemStash } from '../utils/app-drop-protocol'
+import { coverToImageSrc, getDropReceiveItemStash, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
 import {
   isImageOrVideo,
@@ -86,6 +86,11 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   }
 
   const getFilePreview = (file: File): string | null => {
+    const stash = getDropReceiveItemStash(file)
+    const dropUrl = stash && typeof stash.url === 'string' ? stash.url : ''
+    if (isMalianDropVirtualUrl(dropUrl) && file.type.startsWith('image/')) {
+      return dropUrl
+    }
     const cover = getDropCover(file)
     if (cover) {
       return coverToImageSrc(cover, file)

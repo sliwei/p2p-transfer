@@ -1,11 +1,11 @@
-/** 列表内最多文件数 */
+/** 与原生 MALIAN_DROP_MAX_MULTI_COUNT 一致 */
 export const MAX_SELECTED_FILES = 100
 
-/** 单文件须严格小于该字节数（200 MiB） */
+/** 与原生 MALIAN_DROP_MAX_FILE_BYTES 一致（如 20MB） */
 export const MAX_SINGLE_FILE_BYTES = 2000 * 1024 * 1024
 
-/** 列表内各文件大小之和不得超过该上限（再添加时若会使总和大于该值则不可加入，与个数无关） */
-export const MAX_SELECTED_TOTAL_BYTES = MAX_SINGLE_FILE_BYTES
+/** 列表总大小上限：单文件上限 × 条数上限（与马良 Drop 多选策略一致） */
+export const MAX_SELECTED_TOTAL_BYTES = MAX_SINGLE_FILE_BYTES * MAX_SELECTED_FILES
 
 export function sumSelectedFilesBytes(files: File[]): number {
   return files.reduce((s, f) => s + f.size, 0)

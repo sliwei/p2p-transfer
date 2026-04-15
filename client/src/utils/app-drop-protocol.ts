@@ -1,6 +1,6 @@
 /**
  * 与宿主 APP 约定的 drop 协议：解析 dropReceiveFile 入参 → File[]
- * 支持常见 JSON 形态（可按实际 APP 再扩展）
+ * 对齐《马良 Drop：流式传输与 H5 对接说明》：虚拟 host `ml-drop-local`、`dropFileFlow`/`dropSaveFile` 可无 `data` 仅回传虚拟 `url`。
  */
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -35,8 +35,10 @@ export interface DropReceiveFileItem {
   base64?: string
   /** 包含 data: 前缀的 base64 */
   data?: string
-  /** 可下载地址 */
+  /** 虚拟 URL 或公网地址；流式模式下为 `https://ml-drop-local/file/{fileId}` */
   url?: string
+  /** 原始业务地址（CDN 等），仅元数据；不参与解析 */
+  sourceUrl?: string
   path?: string
   messageId?: string
   /** 封面图：非空时列表预览优先用（data URL / http(s) / 纯 base64 均可） */
@@ -68,6 +70,13 @@ export function getDropReceiveItemStash(file: File): Readonly<Record<string, unk
   return dropReceiveItemStashByFile.get(file)
 }
 
+/** 马良 Drop 虚拟文件 URL 前缀（与 MalianDropFileInterceptor 一致） */
+export const MALIAN_DROP_VIRTUAL_URL_PREFIX = 'https://ml-drop-local/file/'
+
+export function isMalianDropVirtualUrl(url: unknown): url is string {
+  return typeof url === 'string' && url.startsWith(MALIAN_DROP_VIRTUAL_URL_PREFIX)
+}
+
 function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
   const name = item.name ?? item.fileName ?? 'file'
   const mime = item.mime ?? item.type ?? item.mimeType ?? 'application/octet-stream'
@@ -77,21 +86,24 @@ function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
     return file as DropReceiveFile
   }
 
-  if (item.data && typeof item.data === 'string') {
-    const base64 = stripDataUrlToBase64(item.data)
+  const dataRaw = item.data
+  if (typeof dataRaw === 'string' && dataRaw.trim() !== '') {
+    const base64 = stripDataUrlToBase64(dataRaw)
     const blob = base64ToBlob(base64, mime)
     return Promise.resolve(finish(new File([blob], name, { type: mime })))
   }
 
-  if (item.base64 && typeof item.base64 === 'string') {
-    const blob = base64ToBlob(item.base64, mime)
+  const base64Raw = item.base64
+  if (typeof base64Raw === 'string' && base64Raw.trim() !== '') {
+    const blob = base64ToBlob(base64Raw, mime)
     return Promise.resolve(finish(new File([blob], name, { type: mime })))
   }
 
   if (item.url && typeof item.url === 'string') {
-    return urlToBlob(item.url).then((blob) =>
-      finish(new File([blob], name, { type: item.type || blob.type || mime }))
-    )
+    return urlToBlob(item.url).then((blob) => {
+      const fileType = blob.type && blob.type !== '' ? blob.type : mime
+      return finish(new File([blob], name, { type: fileType }))
+    })
   }
 
   return Promise.reject(new Error(`dropReceiveFile: 无法解析文件项（需 data, base64 或 url）: ${name}`))
@@ -101,7 +113,8 @@ function itemToFile(item: DropReceiveFileItem): Promise<DropReceiveFile> {
  * 将 APP 通过 registerHandler('dropReceiveFile') 传入的 data 转为 File[]
  *
  * 支持形态示例：
- * - `{ items: [ { kind, mime, data, url, messageId, name }, ... ] }`
+ * - `{ items: [ { kind, mime, url, sourceUrl?, size, messageId, name } ] }`（可无 `data`）
+ * - `{ items: [ { kind, mime, data, ... } ] }`（旧 Base64）
  * - `{ file: { name, base64, type? } }`
  * - `{ files: [ { ... }, ... ] }`
  * - `{ name, base64, type? }` 单文件
@@ -159,30 +172,39 @@ export function blobToBase64DataUrl(blob: Blob): Promise<string> {
   })
 }
 
-/** 将 H5 已选 File[] 转为发给 APP 的 drop 载荷（dropReceiveFile 条目中除 data/base64 外原样带回，并刷新 data/name/size） */
+function fillDropItemMimeAndKind(item: DropAppItem, blobMime: string): void {
+  if (item.mime == null || item.mime === '') item.mime = blobMime || 'application/octet-stream'
+  if (item.kind == null || item.kind === '') {
+    const m =
+      (typeof item.mime === 'string' && item.mime !== '' ? item.mime : blobMime) || 'application/octet-stream'
+    item.kind = m.startsWith('video') ? 'video' : m.startsWith('image') ? 'image' : 'file'
+  }
+}
+
+/**
+ * 将单个 File 转为发给 APP 的 drop 条目：若来自马良虚拟 URL stash 则只回传 url（无 data），否则走 Base64 data URL。
+ */
+export async function fileToDropAppItem(file: File): Promise<DropAppItem> {
+  const stashed: Record<string, unknown> = { ...(dropReceiveItemStashByFile.get(file) ?? {}) }
+  const blobMime = file.type || 'application/octet-stream'
+
+  if (isMalianDropVirtualUrl(stashed.url)) {
+    const item: DropAppItem = { ...stashed, name: file.name, size: file.size }
+    delete item.data
+    delete item.base64
+    fillDropItemMimeAndKind(item, blobMime)
+    return item
+  }
+
+  const dataUrl = await blobToBase64DataUrl(file)
+  const item: DropAppItem = { ...stashed, name: file.name, size: file.size, data: dataUrl }
+  fillDropItemMimeAndKind(item, blobMime)
+  return item
+}
+
+/** 将 H5 已选 File[] 转为发给 APP 的 drop 载荷（dropReceiveFile 条目中除 data/base64 外原样带回；虚拟 URL 条目不编码 data） */
 export async function filesToDropAppPayload(files: File[]): Promise<DropAppPayload> {
-  const items = await Promise.all(
-    files.map(async (file) => {
-      const dataUrl = await blobToBase64DataUrl(file)
-      const blobMime = file.type || 'application/octet-stream'
-      const stashed: Record<string, unknown> = { ...(dropReceiveItemStashByFile.get(file) ?? {}) }
-
-      const item: DropAppItem = {
-        ...stashed,
-        name: file.name,
-        size: file.size,
-        data: dataUrl
-      }
-
-      if (item.mime == null || item.mime === '') item.mime = blobMime || 'application/octet-stream'
-      if (item.kind == null || item.kind === '') {
-        const m = (typeof item.mime === 'string' && item.mime !== '' ? item.mime : blobMime) || 'application/octet-stream'
-        item.kind = m.startsWith('video') ? 'video' : m.startsWith('image') ? 'image' : 'file'
-      }
-
-      return item
-    })
-  )
+  const items = await Promise.all(files.map((file) => fileToDropAppItem(file)))
   return { items }
 }
 

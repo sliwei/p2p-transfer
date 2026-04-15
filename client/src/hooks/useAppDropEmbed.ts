@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 
-import { blobToBase64DataUrl, type DropAppPayload, filesFromDropReceivePayload, filesToDropAppPayload } from '../utils/app-drop-protocol'
+import { blobToBase64DataUrl, type DropAppPayload, filesFromDropReceivePayload, filesToDropAppPayload, fileToDropAppItem } from '../utils/app-drop-protocol'
 import jsBridge, { type JSBridgeHandler } from '../utils/js-bridge'
 import type { ReceivedFile } from './useWebRTC'
 
@@ -32,22 +32,18 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
   const notifyFileFlow = useCallback(async (file: File | ReceivedFile) => {
     if (!jsBridge.isBridgeReady()) return
     try {
-      const blob = 'blob' in file ? file.blob : file
+      if (file instanceof File) {
+        const item = await fileToDropAppItem(file)
+        jsBridge.dropFileFlow({ items: [item] })
+        return
+      }
+      const blob = file.blob
       const dataUrl = await blobToBase64DataUrl(blob)
       const mime = file.type || blob.type || 'application/octet-stream'
       const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
-
-      const payload: DropAppPayload = {
-        items: [
-          {
-            name: file.name,
-            kind,
-            mime,
-            data: dataUrl
-          }
-        ]
-      }
-      jsBridge.dropFileFlow(payload)
+      jsBridge.dropFileFlow({
+        items: [{ name: file.name, kind, mime, data: dataUrl }]
+      })
     } catch (e) {
       console.error('[AppDrop] dropFileFlow error', e)
     }
@@ -65,6 +61,7 @@ export function useAppDropEmbed(options: UseAppDropEmbedOptions) {
     try {
       const items = await Promise.all(
         files.map(async (file) => {
+          if (file.blob instanceof File) return fileToDropAppItem(file.blob)
           const dataUrl = await blobToBase64DataUrl(file.blob)
           const mime = file.type || file.blob.type || 'application/octet-stream'
           const kind = mime.startsWith('video') ? 'video' : mime.startsWith('image') ? 'image' : 'file'
