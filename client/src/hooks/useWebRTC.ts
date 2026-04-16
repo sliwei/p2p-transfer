@@ -654,6 +654,43 @@ export function useWebRTC(roomId: string | null) {
     [clearReceiveAssembleTimer]
   )
 
+  /** 发送端掉线/重连时，清理该对端在本机接收侧的残留状态，避免 UI 卡在「接收中」 */
+  const resetReceivingStateForPeer = useCallback(
+    (peerId: string) => {
+      setIncomingRequests((prev) => prev.filter((r) => r.fromPeerId !== peerId))
+      if (incomingReceiveBatchRef.current?.fromPeerId === peerId) {
+        incomingReceiveBatchRef.current = null
+      }
+      const fileIds = new Set<string>()
+      for (const [fileId, metadata] of fileMetadataRef.current) {
+        if (metadata.fromPeerId === peerId) fileIds.add(fileId)
+      }
+      for (const [fileId, t] of transfersRef.current) {
+        if (t.direction === 'receiving' && t.targetPeerId === peerId) fileIds.add(fileId)
+      }
+      for (const fileId of fileIds) {
+        clearReceiveAssembleTimer(fileId)
+        orphanChunksRef.current.delete(fileId)
+        fileMetadataRef.current.delete(fileId)
+        receiveBuffersRef.current.delete(fileId)
+      }
+      setTransfers((prev) => {
+        const updated = new Map(prev)
+        for (const [id, t] of updated) {
+          if (t.direction === 'receiving' && t.targetPeerId === peerId) updated.delete(id)
+        }
+        return updated
+      })
+      setTransferBatchTotalBytesByPeer((prev) => {
+        if (!(peerId in prev)) return prev
+        const next = { ...prev }
+        delete next[peerId]
+        return next
+      })
+    },
+    [clearReceiveAssembleTimer]
+  )
+
   const finalizeReceiveFileTransfer = useCallback(
     (fileId: string): 'completed' | 'incomplete' | 'aborted' => {
       const metadata = fileMetadataRef.current.get(fileId)
@@ -908,6 +945,7 @@ export function useWebRTC(roomId: string | null) {
   )
   const removePeer = useCallback((peerId: string) => {
     rejectPendingTransferRequestsForPeer(peerId, new Error('对端已断开连接'))
+    resetReceivingStateForPeer(peerId)
     const peer = peersRef.current.get(peerId)
     if (peer) {
       peer.connection.close()
@@ -916,9 +954,6 @@ export function useWebRTC(roomId: string | null) {
     pendingIceCandidatesRef.current.delete(peerId)
     peerDisplayNamesRef.current.delete(peerId)
     peerDeviceTypesRef.current.delete(peerId)
-    if (incomingReceiveBatchRef.current?.fromPeerId === peerId) {
-      incomingReceiveBatchRef.current = null
-    }
     setTransferBatchTotalBytesByPeer((prev) => {
       if (!(peerId in prev)) return prev
       const n = { ...prev }
@@ -936,7 +971,7 @@ export function useWebRTC(roomId: string | null) {
       updated.delete(peerId)
       return updated
     })
-  }, [])
+  }, [resetReceivingStateForPeer])
   const setupDataChannel = useCallback(
     (peerId: string, dataChannel: RTCDataChannel) => {
       dataChannel.binaryType = 'arraybuffer'
@@ -964,6 +999,7 @@ export function useWebRTC(roomId: string | null) {
 
       dataChannel.onclose = () => {
         rejectPendingTransferRequestsForPeer(peerId, new Error('数据通道已关闭'))
+        resetReceivingStateForPeer(peerId)
         const peerInRef = peersRef.current.get(peerId)
         if (peerInRef) {
           peerInRef.iceTransportPath = undefined
@@ -989,7 +1025,7 @@ export function useWebRTC(roomId: string | null) {
         handleDataChannelMessage(peerId, event.data)
       }
     },
-    [handleDataChannelMessage]
+    [handleDataChannelMessage, resetReceivingStateForPeer]
   )
 
   const createPeerConnection = useCallback(
@@ -1369,6 +1405,10 @@ export function useWebRTC(roomId: string | null) {
           return
         }
         rejectAllPendingTransferRequests(new Error('信令已断开，请稍后重试'))
+        const peerIds = Array.from(peersRef.current.keys())
+        for (const peerId of peerIds) {
+          resetReceivingStateForPeer(peerId)
+        }
         setSignalingInRoom(false)
         peersRef.current.forEach((p) => p.connection.close())
         peersRef.current.clear()
@@ -1400,7 +1440,7 @@ export function useWebRTC(roomId: string | null) {
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [roomId, createPeerConnection, handleOffer, handleAnswer, handleIceCandidate, removePeer, applyRemoteDisplayName, applyRemoteDeviceSubtitle])
+  }, [roomId, createPeerConnection, handleOffer, handleAnswer, handleIceCandidate, removePeer, applyRemoteDisplayName, applyRemoteDeviceSubtitle, resetReceivingStateForPeer])
 
   // Separate cleanup effect for component unmount
   useEffect(() => {

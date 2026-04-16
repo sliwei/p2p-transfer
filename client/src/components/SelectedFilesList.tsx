@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 
 import { coverToImageSrc, getDropReceiveItemStash, getEffectiveDropFileSize, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
-import { isVideoFile, MAX_SELECTED_FILES, mergeFeedbackMessage, mergeIntoSelectedFiles, sumSelectedFilesBytes } from '../utils/selected-files-policy'
+import { isImageOrVideo, isVideoFile, MAX_SELECTED_FILES, mergeFeedbackMessage, mergeIntoSelectedFiles, sumSelectedFilesBytes } from '../utils/selected-files-policy'
 
 interface SelectedFilesListProps {
   files: File[]
@@ -12,6 +12,7 @@ interface SelectedFilesListProps {
   onSendFiles: () => void
   canSend: boolean
   isSending: boolean
+  isReceiving: boolean
 }
 
 /** 人类可读大小，如 20 kb / 2 Mb / 1.5 Gb */
@@ -40,17 +41,19 @@ function getDropCover(file: File): string | undefined {
   return c || undefined
 }
 
-export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onFilesChange, onSelectMore, onSendFiles, canSend, isSending }) => {
+export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onFilesChange, onSelectMore, onSendFiles, canSend, isSending, isReceiving }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const transferLocked = isSending || isReceiving
 
   const handleRemove = (indexToRemove: number) => {
+    if (transferLocked) return
     onFilesChange(files.filter((_, index) => index !== indexToRemove))
   }
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const picked = e.target.files ? Array.from(e.target.files) : []
-      const r = mergeIntoSelectedFiles(files, picked, () => true)
+      const r = mergeIntoSelectedFiles(files, picked, isImageOrVideo)
       const msg = mergeFeedbackMessage(r)
       if (msg) queueMicrotask(() => toast.warning(msg))
       if (r.next !== files) onFilesChange(r.next)
@@ -62,6 +65,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   )
 
   const handleSelectClick = () => {
+    if (transferLocked) return
     if (files.length >= MAX_SELECTED_FILES) {
       toast.warning(`已达上限（最多 ${MAX_SELECTED_FILES} 个文件），无法继续添加`)
       return
@@ -100,8 +104,8 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
           <button
             type="button"
             onClick={handleSelectClick}
-            disabled={files.length >= MAX_SELECTED_FILES}
-            className="flex items-center text-[15px] text-[#0066FF] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={transferLocked || files.length >= MAX_SELECTED_FILES}
+            className="bg-transparent border-none flex items-center text-[15px] text-[#0066FF] disabled:cursor-not-allowed disabled:opacity-40"
           >
             {files.length > 0 ? '继续选择' : '添加文件'}
             <svg className="w-4 h-4 ml-1" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="8393">
@@ -113,17 +117,17 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
               ></path>
             </svg>
           </button>
-          {files.length > 0 && (
+          {(files.length > 0 || transferLocked) && (
             <button
               onClick={onSendFiles}
-              disabled={!canSend || isSending}
+              disabled={transferLocked || !canSend}
               className="px-4 py-1.5 bg-[#0066FF] text-white text-[14px] font-medium rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors hover:bg-[#0052CC]"
             >
-              {isSending ? '发送中...' : '发送'}
+              {isSending ? '发送中...' : isReceiving ? '接收中...' : '发送'}
             </button>
           )}
         </div>
-        <input type="file" ref={fileInputRef} multiple onChange={handleFileInput} className="hidden" />
+        <input type="file" ref={fileInputRef} multiple accept="image/*,video/mp4,video/quicktime,video/x-m4v,video/*" onChange={handleFileInput} className="hidden" />
       </div>
 
       {files.length > 0 ? (
@@ -157,6 +161,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
                   <button
                     type="button"
                     onClick={() => handleRemove(index)}
+                    disabled={transferLocked}
                     className="absolute -top-2 -right-2 flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-[#FF3B30] text-xs text-white shadow-sm"
                     aria-label={`移除 ${file.name}`}
                   >

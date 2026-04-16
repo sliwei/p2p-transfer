@@ -58,6 +58,11 @@ function App() {
 
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [isSending, setIsSending] = useState(false)
+  const isReceiving = useMemo(
+    () => transfers.some((t) => t.direction === 'receiving' && (t.status === 'pending' || t.status === 'transferring')),
+    [transfers]
+  )
+  const transferLocked = isSending || isReceiving
 
   useEffect(() => {
     console.log('[UI][待传文件列表]', {
@@ -134,26 +139,34 @@ function App() {
     [receiveAction, pendingProcessFiles.length]
   )
 
-  const onReceiveEmbedFiles = useCallback((files: File[]) => {
-    if (!roomIdRef.current) {
-      console.warn('[AppDrop] 请先加入房间后再接收来自 APP 的文件')
-      return
-    }
-    setSelectedFiles((prev) => {
-      const r = mergeIntoSelectedFiles(prev, files, isImageOrVideo)
-      const msg = mergeFeedbackMessage(r)
-      if (msg) queueMicrotask(() => toast.warning(msg))
-      return r.next
-    })
-  }, [])
+  const onReceiveEmbedFiles = useCallback(
+    (files: File[]) => {
+      if (transferLocked) return
+      if (!roomIdRef.current) {
+        console.warn('[AppDrop] 请先加入房间后再接收来自 APP 的文件')
+        return
+      }
+      setSelectedFiles((prev) => {
+        const r = mergeIntoSelectedFiles(prev, files, isImageOrVideo)
+        const msg = mergeFeedbackMessage(r)
+        if (msg) queueMicrotask(() => toast.warning(msg))
+        return r.next
+      })
+    },
+    [transferLocked]
+  )
 
   const { notifySelectFile, notifyFileFlow, notifySaveToAlbumBatch } = useAppDropEmbed({
     onReceiveFiles: onReceiveEmbedFiles
   })
 
-  const handleDropZoneFilesChange = useCallback((files: File[]) => {
-    setSelectedFiles(files)
-  }, [])
+  const handleDropZoneFilesChange = useCallback(
+    (files: File[]) => {
+      if (transferLocked) return
+      setSelectedFiles(files)
+    },
+    [transferLocked]
+  )
 
   useEffect(() => {
     if (!receivedModalPayload?.length) return
@@ -162,7 +175,7 @@ function App() {
     acknowledgeReceivedModal()
   }, [receivedModalPayload, acknowledgeReceivedModal])
   const handleSendFiles = async () => {
-    if (selectedFiles.length === 0 || selectedPeersEffective.length === 0 || isSending) return
+    if (selectedFiles.length === 0 || selectedPeersEffective.length === 0 || transferLocked) return
 
     setIsSending(true)
     await Promise.allSettled(
@@ -192,6 +205,7 @@ function App() {
             onSendFiles={handleSendFiles}
             canSend={selectedPeersEffective.length > 0}
             isSending={isSending}
+            isReceiving={isReceiving}
           />
         </div>
 
@@ -203,7 +217,7 @@ function App() {
             transfers={transfers}
             transferBatchTotalBytesByPeer={transferBatchTotalBytesByPeer}
             outgoingTransferHint={outgoingTransferHint}
-            peerSelectionLocked={isSending}
+            peerSelectionLocked={transferLocked}
           />
         </div>
 
