@@ -1,17 +1,9 @@
 import { useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
-import { coverToImageSrc, getDropReceiveItemStash, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
+import { coverToImageSrc, getDropReceiveItemStash, getEffectiveDropFileSize, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
-import {
-  isImageOrVideo,
-  isVideoFile,
-  MAX_SELECTED_FILES,
-  MAX_SELECTED_TOTAL_BYTES,
-  mergeFeedbackMessage,
-  mergeIntoSelectedFiles,
-  sumSelectedFilesBytes,
-} from '../utils/selected-files-policy'
+import { isVideoFile, MAX_SELECTED_FILES, mergeFeedbackMessage, mergeIntoSelectedFiles, sumSelectedFilesBytes } from '../utils/selected-files-policy'
 
 interface SelectedFilesListProps {
   files: File[]
@@ -58,7 +50,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const picked = e.target.files ? Array.from(e.target.files) : []
-      const r = mergeIntoSelectedFiles(files, picked, isImageOrVideo)
+      const r = mergeIntoSelectedFiles(files, picked, () => true)
       const msg = mergeFeedbackMessage(r)
       if (msg) queueMicrotask(() => toast.warning(msg))
       if (r.next !== files) onFilesChange(r.next)
@@ -70,10 +62,6 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   )
 
   const handleSelectClick = () => {
-    if (sumSelectedFilesBytes(files) >= MAX_SELECTED_TOTAL_BYTES) {
-      toast.warning(`列表总大小已达 ${MAX_SELECTED_TOTAL_BYTES / 1024 / 1024}MB 上限，无法继续添加`)
-      return
-    }
     if (files.length >= MAX_SELECTED_FILES) {
       toast.warning(`已达上限（最多 ${MAX_SELECTED_FILES} 个文件），无法继续添加`)
       return
@@ -106,15 +94,13 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
       <div className="flex items-center justify-between gap-2 mb-3">
         <h2 className="min-w-0 flex-1 text-[17px] font-medium text-[#333333]">
           选择{files.length}/{MAX_SELECTED_FILES}个文件
-          <span className="mt-0.5 block text-[14px] font-normal text-[#888888] sm:mt-0 sm:ml-1.5 sm:inline">
-            （共 {formatFileSize(sumSelectedFilesBytes(files))}）
-          </span>
+          <span className="mt-0.5 block text-[14px] font-normal text-[#888888] sm:mt-0 sm:ml-1.5 sm:inline">（共 {formatFileSize(sumSelectedFilesBytes(files))}）</span>
         </h2>
         <div className="flex shrink-0 items-center gap-4">
           <button
             type="button"
             onClick={handleSelectClick}
-            disabled={files.length >= MAX_SELECTED_FILES || sumSelectedFilesBytes(files) >= MAX_SELECTED_TOTAL_BYTES}
+            disabled={files.length >= MAX_SELECTED_FILES}
             className="flex items-center text-[15px] text-[#0066FF] disabled:cursor-not-allowed disabled:opacity-40"
           >
             {files.length > 0 ? '继续选择' : '添加文件'}
@@ -137,14 +123,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
             </button>
           )}
         </div>
-        <input
-          type="file"
-          ref={fileInputRef}
-          multiple
-          accept="image/*,video/*"
-          onChange={handleFileInput}
-          className="hidden"
-        />
+        <input type="file" ref={fileInputRef} multiple onChange={handleFileInput} className="hidden" />
       </div>
 
       {files.length > 0 ? (
@@ -184,7 +163,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
                     ×
                   </button>
                 </div>
-                <p className="mt-1 text-center text-[10px] leading-tight text-[#666666]">{formatFileSize(file.size)}</p>
+                <p className="mt-1 text-center text-[10px] leading-tight text-[#666666]">{formatFileSize(getEffectiveDropFileSize(file))}</p>
               </div>
             )
           })}

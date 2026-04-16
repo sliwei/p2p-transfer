@@ -1,3 +1,5 @@
+import { summarizeForLog } from './log-sanitize'
+
 /** 原生回调：入参为原生回传的任意 JSON/字符串等 */
 export type JSBridgeCallback = (data?: unknown) => void
 
@@ -166,6 +168,7 @@ class JsBridge {
       if (!this.registeredToNative.has(handlerName)) {
         this.registeredToNative.add(handlerName)
         originalRegisterHandler(handlerName, (data: unknown, callback?: JSBridgeCallback) => {
+          console.log('[JsBridge] native→H5', handlerName, summarizeForLog(data))
           const handlers = this.handlersMap.get(handlerName)
           if (handlers) {
             handlers.forEach((h) => {
@@ -223,13 +226,16 @@ class JsBridge {
    */
   callHandler(handlerName: string, data?: unknown, callback?: JSBridgeCallback): void {
     if (!this.isNativeEmbedHost()) {
+      console.log('[JsBridge] H5→native(跳过，非 WebView)', handlerName, summarizeForLog(data))
       callback?.({ error: 'Not in WebView environment' })
       return
     }
 
+    console.log('[JsBridge] H5→native', handlerName, summarizeForLog(data))
     this.waitForReady(() => {
       if (this.window.WebViewJavascriptBridge) {
         this.window.WebViewJavascriptBridge.callHandler(handlerName, data, (response: unknown) => {
+          console.log('[JsBridge] native→H5 回调', handlerName, summarizeForLog(response))
           callback?.(response)
         })
       } else {
@@ -332,6 +338,25 @@ class JsBridge {
   /** 4. 请求 APP 保存到相册（通常传 base64 等） */
   dropSaveFile(payload: unknown, callback?: JSBridgeCallback): void {
     this.callHandler('dropSaveFile', payload, callback)
+  }
+
+  /** P1 分片：开始会话，payload `{ sessionId, mime }`（与 `dropSaveFile` 同为独立 handler + 对象） */
+  malianDropChunkStart(sessionId: string, mime?: string, callback?: JSBridgeCallback): void {
+    const m = mime && mime !== '' ? mime : 'application/octet-stream'
+    this.callHandler('dropFileChunkStart', { sessionId, mime: m }, callback)
+  }
+
+  /**
+   * P1 分片：追加 Base64 / data URL。
+   * 载荷为 `{ sessionId, data }`；批量合并由 `malian-drop-chunk` 使用 `{ sessionId, parts }`，宿主须按数组顺序拼接。
+   */
+  malianDropChunk(sessionId: string, data: string, callback?: JSBridgeCallback): void {
+    this.callHandler('dropFileChunk', { sessionId, data }, callback)
+  }
+
+  /** P1 分片：结束并触发原生回调 `dropFileChunkComplete`，payload `{ sessionId }` */
+  malianDropChunkEnd(sessionId: string, callback?: JSBridgeCallback): void {
+    this.callHandler('dropFileChunkEnd', { sessionId }, callback)
   }
 
   /**

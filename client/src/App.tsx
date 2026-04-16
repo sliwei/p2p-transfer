@@ -37,6 +37,7 @@ function App() {
     setMyDisplayName,
     receivedModalPayload,
     acknowledgeReceivedModal,
+    releaseReceivedFiles,
     transferBatchTotalBytesByPeer
   } = useWebRTC(roomId)
 
@@ -57,6 +58,13 @@ function App() {
 
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [isSending, setIsSending] = useState(false)
+
+  useEffect(() => {
+    console.log('[UI][待传文件列表]', {
+      count: selectedFiles.length,
+      files: selectedFiles.map((f) => ({ name: f.name, size: f.size, type: f.type }))
+    })
+  }, [selectedFiles])
 
   /** 仅当对端从就绪列表消失时兜底结束「发送中」；用户手动清空勾选时不触发（见下方 selectedPeers.length 判断）。异步写入以避免 react-hooks/set-state-in-effect。 */
   useEffect(() => {
@@ -314,8 +322,10 @@ function App() {
                 } finally {
                   finishingReceivedRef.current = false
                   setShowReceivedModal(false)
+                  const idsToRelease = files.map((f) => f.id)
                   setPendingProcessFiles([])
                   setReceiveAction(null)
+                  releaseReceivedFiles(idsToRelease)
                 }
               }}
             />

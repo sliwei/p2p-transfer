@@ -2,6 +2,7 @@ import { generateCuteNickname } from 'cute-nickname'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
+import { getDropReceiveItemStash, getEffectiveDropFileSize, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
 import { triggerBrowserDownload, triggerBrowserDownloads } from '../utils/triggerDownload'
 
 /** 本机开发：信令与 rtc-config 统一走 127.0.0.1:3001（IPv4），避免 localhost 解析到 ::1 与 WebRTC 的 127.0.0.1 host 候选混用；并与仅用「局域网 IP 打开页面」时的行为区分。 */
@@ -150,6 +151,28 @@ const CHUNK_SIZE = 32 * 1024
 const RECEIVE_ASSEMBLE_RETRY_MS = 50
 const RECEIVE_ASSEMBLE_MAX_ATTEMPTS = 80
 
+/**
+ * 接收端：累积分片达到此字节数时，合并为 partial Blob 并释放 ArrayBuffer。
+ * Blob 数据由浏览器管理（可落 tmp/mmap），不直接占 JS 堆，显著降低 WebView OOM 风险。
+ */
+const RECEIVE_FLUSH_BYTES = 4 * 1024 * 1024
+
+interface FileReceiveBuffer {
+  partialBlobs: Blob[]
+  partialBlobsBytes: number
+  pendingChunks: ArrayBuffer[]
+  pendingChunksBytes: number
+  receivedCount: number
+}
+
+function flushReceiveBuffer(buf: FileReceiveBuffer): void {
+  if (buf.pendingChunks.length === 0) return
+  buf.partialBlobs.push(new Blob(buf.pendingChunks))
+  buf.partialBlobsBytes += buf.pendingChunksBytes
+  buf.pendingChunks = []
+  buf.pendingChunksBytes = 0
+}
+
 /** 允许更多数据在途；与较小分片搭配，略降阈值以便更早背压 */
 const DC_SEND_BUFFER_HIGH_WATER = 2 * 1024 * 1024
 
@@ -178,6 +201,83 @@ async function waitUntilDataChannelCanSend(dc: RTCDataChannel, limit = DC_SEND_B
     }
   }
 }
+
+/**
+ * 马良虚拟 URL：`fetch` + ReadableStream 按 P2P 分片长度读入 buffer，不整段 `blob()`/`arrayBuffer()`。
+ * 避免将 `carry` 与单次 `read()` 的 `value` 拼成新的大 `Uint8Array`（双倍峰值，大文件易触发 renderer OOM）。
+ */
+async function readVirtualUrlChunkToBuffer(reader: ReadableStreamDefaultReader<Uint8Array>, streamState: { carry: Uint8Array; streamDone: boolean }, byteLength: number): Promise<ArrayBuffer> {
+  const out = new Uint8Array(byteLength)
+  let pos = 0
+  while (pos < byteLength) {
+    if (streamState.carry.length > 0) {
+      const n = Math.min(streamState.carry.length, byteLength - pos)
+      out.set(streamState.carry.subarray(0, n), pos)
+      pos += n
+      streamState.carry = streamState.carry.subarray(n)
+      continue
+    }
+    if (streamState.streamDone) break
+    const { done, value } = await reader.read()
+    if (done) streamState.streamDone = true
+    if (!value?.length) continue
+    const need = byteLength - pos
+    if (value.length <= need) {
+      out.set(value, pos)
+      pos += value.length
+    } else {
+      out.set(value.subarray(0, need), pos)
+      pos += need
+      streamState.carry = value.subarray(need)
+    }
+  }
+  if (pos < byteLength) {
+    throw new Error('马良虚拟文件流提前结束，与声明大小不一致')
+  }
+  return out.buffer
+}
+
+type PairdropFileBridgeNative = {
+  open: (fileId: string) => boolean
+  readChunkBase64: (fileId: string, byteLength: number) => string | null
+  close: (fileId: string) => void
+}
+
+function getPairdropFileBridge(): PairdropFileBridgeNative | null {
+  const w = window as Window & { PairdropFileBridge?: PairdropFileBridgeNative }
+  const b = w.PairdropFileBridge
+  if (!b || typeof b.open !== 'function' || typeof b.readChunkBase64 !== 'function' || typeof b.close !== 'function') {
+    return null
+  }
+  return b
+}
+
+function extractVirtualFileId(virtualUrl: string): string {
+  const raw = virtualUrl
+    .slice(virtualUrl.lastIndexOf('/') + 1)
+    .split('?')[0]
+    .split('#')[0]
+  if (!raw) return ''
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
+function base64ChunkToArrayBuffer(base64: string, expectedByteLength: number): ArrayBuffer {
+  const bin = atob(base64)
+  const len = bin.length
+  if (len !== expectedByteLength) {
+    throw new Error(`原生分片长度不一致: expected=${expectedByteLength} actual=${len}`)
+  }
+  const out = new Uint8Array(len)
+  for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i)
+  return out.buffer
+}
+
+/** 发送大文件时降低 `setTransfers` 频率，减轻 WebView 渲染压力（分片仍按 CHUNK_SIZE 发送） */
+const SEND_PROGRESS_UI_MIN_MS = 160
 
 /** 198.18.0.0/15 常为 Clash/Surge 等 TUN、Fake-IP；WebRTC host 走该地址时与对端真实网卡候选极难配对 */
 function candidateLooksLikeTunnelFakeIp(candidateStr: string): boolean {
@@ -301,6 +401,39 @@ export interface TransferProgress {
   direction: 'sending' | 'receiving'
 }
 
+/** 每个 fileId 在 0% / 50% / 100% 各打一条 `[P2P][传输进度]`，替代逐分片与全量列表刷屏 */
+function emitTransferProgressMilestoneLogs(transfers: Map<string, TransferProgress>, milestonesByFileId: Map<string, Set<0 | 50 | 100>>): void {
+  const active = new Set<string>()
+  for (const t of transfers.values()) {
+    active.add(t.fileId)
+    let m = milestonesByFileId.get(t.fileId)
+    if (!m) {
+      m = new Set()
+      milestonesByFileId.set(t.fileId, m)
+    }
+    const { sentBytes, fileSize, status } = t
+    const r = fileSize > 0 ? sentBytes / fileSize : 0
+    const doneOk = status === 'completed' || (fileSize > 0 && sentBytes >= fileSize && status !== 'error')
+
+    const log = (pct: 0 | 50 | 100) => {
+      if (m!.has(pct)) return
+      m!.add(pct)
+      console.log(`[P2P][传输进度] ${pct}%`, { ...t })
+    }
+
+    log(0)
+    if (fileSize > 0 && r >= 0.5) log(50)
+    if (doneOk) {
+      if (fileSize > 0 && r >= 0.5 && !m!.has(50)) log(50)
+      if (fileSize === 0 && !m!.has(50)) log(50)
+      log(100)
+    }
+  }
+  for (const id of milestonesByFileId.keys()) {
+    if (!active.has(id)) milestonesByFileId.delete(id)
+  }
+}
+
 export interface ReceivedFile {
   id: string
   name: string
@@ -380,7 +513,7 @@ export function useWebRTC(roomId: string | null) {
   /** ICE candidates received before we have a Peer (e.g. trickle arrives before offer) */
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
   const transfersRef = useRef<Map<string, TransferProgress>>(new Map())
-  const receivedChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map())
+  const receiveBuffersRef = useRef<Map<string, FileReceiveBuffer>>(new Map())
   /** 分片早于 file-start 到达时暂存（unordered DC） */
   const orphanChunksRef = useRef<Map<string, Map<number, ArrayBuffer>>>(new Map())
   const receiveAssembleTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -389,6 +522,7 @@ export function useWebRTC(roomId: string | null) {
   const receivedFilesRef = useRef<ReceivedFile[]>([])
   /** 与 transfer-request 对齐：收到几份 file-complete 后再弹窗 */
   const incomingReceiveBatchRef = useRef<{ fromPeerId: string; total: number; completed: number; sliceStart: number } | null>(null)
+  const transferProgressLogMilestonesRef = useRef<Map<string, Set<0 | 50 | 100>>>(new Map())
 
   /** 对端断开 / DC 关闭 / 信令断开时立即结束「等待对方确认」，避免 sendFilesBatch 挂起导致 UI 一直「发送中」 */
   const rejectPendingTransferRequestsForPeer = (peerId: string, reason: Error) => {
@@ -443,8 +577,29 @@ export function useWebRTC(roomId: string | null) {
   }, [transfers])
 
   useEffect(() => {
+    emitTransferProgressMilestoneLogs(transfers, transferProgressLogMilestonesRef.current)
+  }, [transfers])
+
+  useEffect(() => {
     receivedFilesRef.current = receivedFiles
   }, [receivedFiles])
+
+  useEffect(() => {
+    console.log('[P2P][已接收文件列表]', {
+      count: receivedFiles.length,
+      files: receivedFiles.map((f) => ({
+        id: f.id,
+        name: f.name,
+        size: f.size,
+        type: f.type,
+        fromPeerId: f.fromPeerId
+      }))
+    })
+  }, [receivedFiles])
+
+  useEffect(() => {
+    console.log('[P2P][入站传输请求列表]', incomingRequests)
+  }, [incomingRequests])
 
   useEffect(() => {
     refreshIcePathRef.current = (peerId: string) => {
@@ -485,7 +640,7 @@ export function useWebRTC(roomId: string | null) {
       console.error('[DataChannel] 分片缺失，丢弃损坏文件:', fileId, detail)
       orphanChunksRef.current.delete(fileId)
       fileMetadataRef.current.delete(fileId)
-      receivedChunksRef.current.delete(fileId)
+      receiveBuffersRef.current.delete(fileId)
       setTransfers((prev) => {
         const updated = new Map(prev)
         const tr = updated.get(fileId)
@@ -502,19 +657,15 @@ export function useWebRTC(roomId: string | null) {
   const finalizeReceiveFileTransfer = useCallback(
     (fileId: string): 'completed' | 'incomplete' | 'aborted' => {
       const metadata = fileMetadataRef.current.get(fileId)
-      const chunks = receivedChunksRef.current.get(fileId)
-      if (!metadata || !chunks) return 'aborted'
+      const buf = receiveBuffersRef.current.get(fileId)
+      if (!metadata || !buf) return 'aborted'
 
-      for (let i = 0; i < metadata.totalChunks; i++) {
-        if (!chunks.has(i)) return 'incomplete'
+      if (buf.receivedCount < metadata.totalChunks) return 'incomplete'
+
+      if (buf.pendingChunks.length > 0) {
+        flushReceiveBuffer(buf)
       }
-
-      const orderedChunks: ArrayBuffer[] = []
-      for (let i = 0; i < metadata.totalChunks; i++) {
-        orderedChunks.push(chunks.get(i)!)
-      }
-
-      const blob = new Blob(orderedChunks, { type: metadata.type })
+      const blob = new Blob(buf.partialBlobs, { type: metadata.type })
       const receivedFile: ReceivedFile = {
         id: fileId,
         name: metadata.name,
@@ -524,6 +675,13 @@ export function useWebRTC(roomId: string | null) {
         fromPeerId: metadata.fromPeerId,
         timestamp: Date.now()
       }
+      console.log('[P2P][传输进度] 接收文件组装完成', {
+        fileId,
+        name: metadata.name,
+        size: metadata.size,
+        fromPeerId: metadata.fromPeerId,
+        blobSize: blob.size
+      })
 
       clearReceiveAssembleTimer(fileId)
       orphanChunksRef.current.delete(fileId)
@@ -566,7 +724,7 @@ export function useWebRTC(roomId: string | null) {
         return updated
       })
       fileMetadataRef.current.delete(fileId)
-      receivedChunksRef.current.delete(fileId)
+      receiveBuffersRef.current.delete(fileId)
       if (modalSliceStart !== null) {
         const fromId = metadata.fromPeerId
         queueMicrotask(() => {
@@ -591,8 +749,8 @@ export function useWebRTC(roomId: string | null) {
       if (attempt >= RECEIVE_ASSEMBLE_MAX_ATTEMPTS) {
         receiveAssembleTimersRef.current.delete(fileId)
         const metadata = fileMetadataRef.current.get(fileId)
-        const chunks = receivedChunksRef.current.get(fileId)
-        const got = chunks?.size ?? 0
+        const buf = receiveBuffersRef.current.get(fileId)
+        const got = buf?.receivedCount ?? 0
         failReceiveAssembly(fileId, metadata ? `超时仍未收齐分片 ${got}/${metadata.totalChunks}` : '状态已丢失')
         return
       }
@@ -617,10 +775,12 @@ export function useWebRTC(roomId: string | null) {
           const message = JSON.parse(data)
           if (message.type === 'peer-display') {
             const dn = typeof message.displayName === 'string' ? message.displayName : ''
+            console.log('[P2P][协议] DC peer-display', { fromPeerId: peerId, displayName: dn })
             applyRemoteDisplayName(peerId, dn)
             return
           }
           if (message.type === 'transfer-request') {
+            console.log('[P2P][协议] DC transfer-request', { fromPeerId: peerId, requestId: message.requestId, filesInfo: message.filesInfo })
             const fromPeerName = peersRef.current.get(peerId)?.name?.trim() || peerDisplayNamesRef.current.get(peerId)?.trim() || ''
             setIncomingRequests((prev) => [
               ...prev,
@@ -632,6 +792,7 @@ export function useWebRTC(roomId: string | null) {
               }
             ])
           } else if (message.type === 'transfer-response') {
+            console.log('[P2P][协议] DC transfer-response', { fromPeerId: peerId, requestId: message.requestId, accepted: message.accepted })
             const pending = pendingRequestsRef.current.get(message.requestId)
             if (pending) {
               if (message.accepted) {
@@ -642,6 +803,7 @@ export function useWebRTC(roomId: string | null) {
               pendingRequestsRef.current.delete(message.requestId)
             }
           } else if (message.type === 'file-start') {
+            console.log('[P2P][协议] DC file-start', { fromPeerId: peerId, fileId: message.fileId, fileName: message.fileName, fileSize: message.fileSize, totalChunks: message.totalChunks })
             // Initialize file reception
             const fileId = message.fileId
             fileMetadataRef.current.set(fileId, {
@@ -651,15 +813,27 @@ export function useWebRTC(roomId: string | null) {
               totalChunks: message.totalChunks,
               fromPeerId: peerId
             })
-            receivedChunksRef.current.set(fileId, new Map())
-            const bucket = receivedChunksRef.current.get(fileId)!
+            const buf: FileReceiveBuffer = {
+              partialBlobs: [],
+              partialBlobsBytes: 0,
+              pendingChunks: [],
+              pendingChunksBytes: 0,
+              receivedCount: 0
+            }
             const orphans = orphanChunksRef.current.get(fileId)
             if (orphans) {
               orphanChunksRef.current.delete(fileId)
-              orphans.forEach((buf, idx) => {
-                bucket.set(idx, buf)
-              })
+              const sorted = [...orphans.entries()].sort((a, b) => a[0] - b[0])
+              for (const [, chunkBuf] of sorted) {
+                buf.pendingChunks.push(chunkBuf)
+                buf.pendingChunksBytes += chunkBuf.byteLength
+                buf.receivedCount++
+              }
+              if (buf.pendingChunksBytes >= RECEIVE_FLUSH_BYTES) {
+                flushReceiveBuffer(buf)
+              }
             }
+            receiveBuffersRef.current.set(fileId, buf)
 
             setTransfers((prev) => {
               const updated = new Map(prev)
@@ -677,6 +851,7 @@ export function useWebRTC(roomId: string | null) {
             })
           } else if (message.type === 'file-complete') {
             const fileId = message.fileId
+            console.log('[P2P][协议] DC file-complete', { fromPeerId: peerId, fileId })
             const r = finalizeReceiveFileTransfer(fileId)
             if (r === 'incomplete') {
               scheduleReceiveAssemblyRetries(fileId, 0)
@@ -694,16 +869,18 @@ export function useWebRTC(roomId: string | null) {
         const chunkData = new Uint8Array(data, 8 + fileIdLength)
         const chunkBuf = chunkData.buffer.slice(chunkData.byteOffset, chunkData.byteOffset + chunkData.byteLength)
 
-        const chunks = receivedChunksRef.current.get(fileId)
-        if (chunks) {
-          chunks.set(chunkIndex, chunkBuf)
+        const buf = receiveBuffersRef.current.get(fileId)
+        if (buf) {
+          buf.pendingChunks.push(chunkBuf)
+          buf.pendingChunksBytes += chunkBuf.byteLength
+          buf.receivedCount++
+          if (buf.pendingChunksBytes >= RECEIVE_FLUSH_BYTES) {
+            flushReceiveBuffer(buf)
+          }
 
           const metadata = fileMetadataRef.current.get(fileId)
           if (metadata) {
-            let receivedBytes = 0
-            chunks.forEach((buf) => {
-              receivedBytes += buf.byteLength
-            })
+            const receivedBytes = buf.partialBlobsBytes + buf.pendingChunksBytes
             setTransfers((prev) => {
               const updated = new Map(prev)
               const transfer = updated.get(fileId)
@@ -713,7 +890,7 @@ export function useWebRTC(roomId: string | null) {
               return updated
             })
 
-            if (chunks.size === metadata.totalChunks) {
+            if (buf.receivedCount === metadata.totalChunks) {
               void finalizeReceiveFileTransfer(fileId)
             }
           }
@@ -1237,6 +1414,7 @@ export function useWebRTC(roomId: string | null) {
       const pendingMap = pendingIceCandidatesRef.current
       const timersMap = receiveAssembleTimersRef.current
       const orphanMap = orphanChunksRef.current
+      const buffersMap = receiveBuffersRef.current
       const peersSnapshot = new Map(peerMap)
       peersSnapshot.forEach((peer) => {
         peer.connection.close()
@@ -1246,12 +1424,16 @@ export function useWebRTC(roomId: string | null) {
       timersMap.forEach((tid) => clearTimeout(tid))
       timersMap.clear()
       orphanMap.clear()
+      buffersMap.clear()
     }
   }, [])
 
   const sendFile = useCallback(async (file: File, targetPeerId?: string) => {
     const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+    const fileSize = getEffectiveDropFileSize(file)
+    const stash = getDropReceiveItemStash(file)
+    const virtualUrl = stash && typeof stash.url === 'string' && isMalianDropVirtualUrl(stash.url) ? stash.url : null
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE)
 
     const peersToSend = targetPeerId
       ? (() => {
@@ -1271,7 +1453,7 @@ export function useWebRTC(roomId: string | null) {
       updated.set(fileId, {
         fileId,
         fileName: file.name,
-        fileSize: file.size,
+        fileSize,
         sentBytes: 0,
         speed: 0,
         status: 'transferring',
@@ -1286,10 +1468,14 @@ export function useWebRTC(roomId: string | null) {
       type: 'file-start',
       fileId,
       fileName: file.name,
-      fileSize: file.size,
+      fileSize,
       fileType: file.type,
       totalChunks
     }
+    console.log('[P2P][发送] file-start', metadata, {
+      targetPeerIds: peersToSend.map((p) => p.id),
+      virtualUrl: virtualUrl ?? undefined
+    })
 
     const markTransferError = (reason: string) => {
       console.error('[WebRTC] sendFile:', reason)
@@ -1304,6 +1490,10 @@ export function useWebRTC(roomId: string | null) {
       })
     }
 
+    let virtualReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+    let nativeVirtualBridge: PairdropFileBridgeNative | null = null
+    let nativeVirtualFileId = ''
+
     try {
       for (const peer of peersToSend) {
         if (peer.dataChannel?.readyState === 'open') {
@@ -1316,11 +1506,39 @@ export function useWebRTC(roomId: string | null) {
       let sentBytes = 0
       const startTime = Date.now()
 
+      const virtualStreamState = { carry: new Uint8Array(0), streamDone: false }
+      if (virtualUrl) {
+        const bridge = getPairdropFileBridge()
+        const fileId = extractVirtualFileId(virtualUrl)
+        if (bridge && fileId) {
+          const opened = bridge.open(fileId)
+          if (!opened) {
+            throw new Error(`原生虚拟文件打开失败: fileId=${fileId}`)
+          }
+          nativeVirtualBridge = bridge
+          nativeVirtualFileId = fileId
+          console.log('[P2P][发送] 虚拟文件读取路径=native-bridge', { fileId, fileSize })
+        } else {
+          const res = await fetch(virtualUrl)
+          if (!res.ok) throw new Error(`读取马良虚拟文件失败: ${res.status}`)
+          if (!res.body) throw new Error('马良虚拟文件响应无可读流')
+          virtualReader = res.body.getReader()
+          console.log('[P2P][发送] 虚拟文件读取路径=fetch-stream', { fileSize })
+        }
+      }
+
+      let lastProgressUiAt = 0
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_SIZE
-        const end = Math.min(start + CHUNK_SIZE, file.size)
-        const chunk = file.slice(start, end)
-        const arrayBuffer = await chunk.arrayBuffer()
+        const end = Math.min(start + CHUNK_SIZE, fileSize)
+        const chunkByteLen = end - start
+
+        const arrayBuffer: ArrayBuffer =
+          nativeVirtualBridge != null
+            ? base64ChunkToArrayBuffer(nativeVirtualBridge.readChunkBase64(nativeVirtualFileId, chunkByteLen) ?? '', chunkByteLen)
+            : virtualReader != null
+              ? await readVirtualUrlChunkToBuffer(virtualReader, virtualStreamState, chunkByteLen)
+              : await file.slice(start, end).arrayBuffer()
 
         // Create chunk packet: [fileIdLength: 4 bytes][fileId: N bytes][chunkIndex: 4 bytes][data]
         const fileIdBytes = new TextEncoder().encode(fileId)
@@ -1348,15 +1566,19 @@ export function useWebRTC(roomId: string | null) {
         const elapsed = (Date.now() - startTime) / 1000
         const speed = elapsed > 0 ? sentBytes / elapsed : 0
 
-        setTransfers((prev) => {
-          const updated = new Map(prev)
-          const transfer = updated.get(fileId)
-          if (transfer) {
-            transfer.sentBytes = sentBytes
-            transfer.speed = speed
-          }
-          return updated
-        })
+        const now = Date.now()
+        if (now - lastProgressUiAt >= SEND_PROGRESS_UI_MIN_MS || i === totalChunks - 1) {
+          lastProgressUiAt = now
+          setTransfers((prev) => {
+            const updated = new Map(prev)
+            const transfer = updated.get(fileId)
+            if (transfer) {
+              transfer.sentBytes = sentBytes
+              transfer.speed = speed
+            }
+            return updated
+          })
+        }
       }
 
       for (const peer of peersToSend) {
@@ -1365,6 +1587,8 @@ export function useWebRTC(roomId: string | null) {
           peer.dataChannel.send(JSON.stringify({ type: 'file-complete', fileId }))
         }
       }
+
+      console.log('[P2P][发送] file-complete 已发', { fileId, fileName: file.name, sentBytes, targetPeerIds: peersToSend.map((p) => p.id) })
 
       setTransfers((prev) => {
         const updated = new Map(prev)
@@ -1378,6 +1602,19 @@ export function useWebRTC(roomId: string | null) {
       const msg = e instanceof Error ? e.message : String(e)
       markTransferError(msg)
       throw e
+    } finally {
+      try {
+        if (virtualReader) await virtualReader.cancel().catch(() => {})
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (nativeVirtualBridge && nativeVirtualFileId) {
+          nativeVirtualBridge.close(nativeVirtualFileId)
+        }
+      } catch {
+        /* ignore */
+      }
     }
 
     return fileId
@@ -1397,7 +1634,7 @@ export function useWebRTC(roomId: string | null) {
       }
 
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-      const filesInfo = files.map((f) => ({ name: f.name, size: f.size }))
+      const filesInfo = files.map((f) => ({ name: f.name, size: getEffectiveDropFileSize(f) }))
 
       setTransfers((prev) => {
         const u = new Map(prev)
@@ -1413,6 +1650,7 @@ export function useWebRTC(roomId: string | null) {
         requestId,
         filesInfo
       }
+      console.log('[P2P][发送] transfer-request', { targetPeerId, requestMessage })
 
       updateOutgoingHint(targetPeerId, 'waiting')
 
@@ -1442,7 +1680,7 @@ export function useWebRTC(roomId: string | null) {
 
       updateOutgoingHint(targetPeerId, null)
 
-      const batchTotalBytes = files.reduce((s, f) => s + f.size, 0)
+      const batchTotalBytes = files.reduce((s, f) => s + getEffectiveDropFileSize(f), 0)
       setTransferBatchTotalBytesByPeer((prev) => ({ ...prev, [targetPeerId]: batchTotalBytes }))
 
       try {
@@ -1472,6 +1710,17 @@ export function useWebRTC(roomId: string | null) {
 
   const acknowledgeReceivedModal = useCallback(() => {
     setReceivedModalPayload(null)
+  }, [])
+
+  /** 释放已处理完毕的 receivedFiles Blob 引用，避免 WebView 内存持续累积 */
+  const releaseReceivedFiles = useCallback((fileIds: string[]) => {
+    if (fileIds.length === 0) return
+    const idSet = new Set(fileIds)
+    setReceivedFiles((prev) => {
+      const next = prev.filter((f) => !idSet.has(f.id))
+      receivedFilesRef.current = next
+      return next
+    })
   }, [])
 
   const respondToTransferRequest = useCallback((requestId: string, accepted: boolean) => {
@@ -1573,6 +1822,7 @@ export function useWebRTC(roomId: string | null) {
     downloadReceivedFiles,
     receivedModalPayload,
     acknowledgeReceivedModal,
+    releaseReceivedFiles,
     transferBatchTotalBytesByPeer
   }
 }
