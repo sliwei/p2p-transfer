@@ -24,7 +24,7 @@ export const RoomJoin: React.FC<RoomJoinProps> = ({ roomId, onRoomIdChange, onJo
   const handleCopyLink = () => {
     if (!roomId) return
     const url = new URL(window.location.href)
-    url.searchParams.set('roomid', roomId)
+    url.searchParams.set('r', roomId)
     navigator.clipboard.writeText(url.toString())
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)

@@ -15,15 +15,15 @@ function getSignalingOrigin(): string {
 }
 
 /**
- * 与 `?roomid=…&name=…` 一致：从查询串读取展示名（已按 URL 规则解码，含中文）。
- * 同时支持 hash 内查询串，如 `/#/?name=…`。
+ * 与 `?r=…&n=…` 一致：从查询串读取展示名（已按 URL 规则解码，含中文）。
+ * 同时支持 hash 内查询串，如 `/#/?n=…`。
  */
 export function readDisplayNameFromUrl(): string {
   try {
     const fromSearch = (q: string) => {
       const s = q.startsWith('?') ? q : q ? `?${q}` : ''
       if (!s) return ''
-      const raw = new URLSearchParams(s).get('name')
+      const raw = new URLSearchParams(s).get('n') ?? new URLSearchParams(s).get('name')
       if (raw == null) return ''
       return raw.trim()
     }
@@ -47,7 +47,7 @@ const SESSION_RANDOM_CN_NICKNAME_KEY = 'p2p_transfer_session_cn_nickname'
 export const DISPLAY_NAME_MAX_LEN = 20
 
 /**
- * 展示名：地址栏 `name` 优先；否则本地持久化一条 cute-nickname 生成的中文昵称（localStorage，跨会话不变）
+ * 展示名：地址栏 `n` 优先；否则本地持久化一条 cute-nickname 生成的中文昵称（localStorage，跨会话不变）
  */
 export function getEffectiveDisplayName(): string {
   const fromUrl = readDisplayNameFromUrl().trim().slice(0, DISPLAY_NAME_MAX_LEN)
@@ -81,7 +81,7 @@ export function getEffectiveDisplayName(): string {
   return created
 }
 
-/** 用户改昵称时写入本地（无 URL `name` 时与 getEffectiveDisplayName 同源） */
+/** 用户改昵称时写入本地（无 URL `n` 时与 getEffectiveDisplayName 同源） */
 export function persistRandomCnNickname(name: string) {
   const n = name.trim().slice(0, DISPLAY_NAME_MAX_LEN)
   if (!n || readDisplayNameFromUrl().trim()) return

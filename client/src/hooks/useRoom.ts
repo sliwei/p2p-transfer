@@ -3,9 +3,9 @@ import { useCallback, useState } from 'react'
 import { buildRoomShareUrl } from '../utils/roomLink'
 
 export function useRoom() {
-  const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('roomid'))
+  const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('r') ?? new URLSearchParams(window.location.search).get('roomid'))
   const [inputRoomId, setInputRoomId] = useState(
-    () => new URLSearchParams(window.location.search).get('roomid') ?? ''
+    () => new URLSearchParams(window.location.search).get('r') ?? new URLSearchParams(window.location.search).get('roomid') ?? ''
   )
 
   const joinRoom = useCallback((id: string) => {
@@ -16,7 +16,7 @@ export function useRoom() {
     
     // Update URL without reloading
     const url = new URL(window.location.href);
-    url.searchParams.set('roomid', trimmedId);
+    url.searchParams.set('r', trimmedId);
     window.history.pushState({}, '', url);
   }, []);
 
@@ -35,7 +35,7 @@ export function useRoom() {
     
     // Clear URL
     const url = new URL(window.location.href);
-    url.searchParams.delete('roomid');
+    url.searchParams.delete('r');
     window.history.pushState({}, '', url);
   }, []);
 
