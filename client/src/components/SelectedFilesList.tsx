@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 
 import { coverToImageSrc, getDropReceiveItemStash, getEffectiveDropFileSize, isMalianDropVirtualUrl } from '../utils/app-drop-protocol'
 import jsBridge from '../utils/js-bridge'
-import { isImageOrVideo, isVideoFile, MAX_SELECTED_FILES, mergeFeedbackMessage, mergeIntoSelectedFiles, sumSelectedFilesBytes } from '../utils/selected-files-policy'
+import { isVideoFile, MAX_SELECTED_FILES, mergeFeedbackMessage, mergeIntoSelectedFiles, sumSelectedFilesBytes } from '../utils/selected-files-policy'
 
 interface SelectedFilesListProps {
   files: File[]
@@ -53,7 +53,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const picked = e.target.files ? Array.from(e.target.files) : []
-      const r = mergeIntoSelectedFiles(files, picked, isImageOrVideo)
+      const r = mergeIntoSelectedFiles(files, picked, () => true)
       const msg = mergeFeedbackMessage(r)
       if (msg) queueMicrotask(() => toast.warning(msg))
       if (r.next !== files) onFilesChange(r.next)
@@ -127,7 +127,7 @@ export const SelectedFilesList: React.FC<SelectedFilesListProps> = ({ files, onF
             </button>
           )}
         </div>
-        <input type="file" ref={fileInputRef} multiple accept="image/*,video/mp4,video/quicktime,video/x-m4v,video/*" onChange={handleFileInput} className="hidden" />
+        <input type="file" ref={fileInputRef} multiple onChange={handleFileInput} className="hidden" />
       </div>
 
       {files.length > 0 ? (
