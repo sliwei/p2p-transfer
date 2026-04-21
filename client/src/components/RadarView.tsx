@@ -101,19 +101,29 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
   /** 点击同一设备时递增 n，强制 remount 以重复播放果冻动画 */
   const [jellyPulse, setJellyPulse] = useState<{ id: string; n: number } | null>(null)
 
-  const getProgress = (peerId: string) => {
+  const getProgress = (peerId: string): { value: number; label: string } | null => {
     const manifestTotal = transferBatchTotalBytesByPeer[peerId]
     const peerTransfers = transfers.filter((t) => t.targetPeerId === peerId && (t.status === 'pending' || t.status === 'transferring' || t.status === 'completed'))
     const doneBytes = peerTransfers.reduce((acc, t) => {
       if (t.status === 'completed') return acc + t.fileSize
       return acc + Math.min(t.sentBytes, t.fileSize)
     }, 0)
-    if (manifestTotal != null && manifestTotal > 0) {
-      return Math.min(100, Math.round((doneBytes / manifestTotal) * 100))
-    }
     if (peerTransfers.length === 0) return null
-    const total = peerTransfers.reduce((acc, t) => acc + t.fileSize, 0)
-    return total > 0 ? Math.round((doneBytes / total) * 100) : 0
+    const transfersTotal = peerTransfers.reduce((acc, t) => acc + t.fileSize, 0)
+    const total = manifestTotal != null && manifestTotal > 0 ? manifestTotal : transfersTotal
+    if (total <= 0) return { value: 0, label: '0%' }
+    if (doneBytes === 0 && peerTransfers.some((t) => t.status === 'transferring')) {
+      return { value: 0, label: '准备中' }
+    }
+
+    const exactPercent = Math.max(0, Math.min(100, (doneBytes / total) * 100))
+    const hasSentBytes = doneBytes > 0
+    const displayValue = hasSentBytes && exactPercent < 0.8 ? 0.8 : exactPercent
+
+    if (exactPercent >= 100) return { value: 100, label: '100%' }
+    if (hasSentBytes && exactPercent < 1) return { value: displayValue, label: '<1%' }
+    if (exactPercent < 10) return { value: displayValue, label: `${exactPercent.toFixed(1)}%` }
+    return { value: displayValue, label: `${Math.round(exactPercent)}%` }
   }
 
   /** mb-pairdrop 卡片：`.name`=displayName（上一行），`.device-name`=deviceName（本行，UA 解析） */
@@ -130,7 +140,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
       <div className="flex overflow-x-auto gap-4 scrollbar-hide relative z-10">
         {readyPeers.map((peer) => {
           const hint = outgoingTransferHint?.[peer.id]
-          const rawProgress = getProgress(peer.id)
+          const progress = getProgress(peer.id)
           const isSelected = selectedPeers.includes(peer.id)
 
           return (
@@ -145,7 +155,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
             >
               <div className="relative mb-2 flex items-center justify-center w-[72px] h-[72px]">
                 {/* Circular Progress */}
-                {rawProgress !== null && hint !== 'waiting' && hint !== 'rejected' && (
+                {progress !== null && hint !== 'waiting' && hint !== 'rejected' && (
                   <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 72 72">
                     <circle cx="36" cy="36" r="34" fill="none" stroke="#E5E5E5" strokeWidth="2" />
                     <circle
@@ -156,7 +166,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
                       stroke="#2266FE"
                       strokeWidth="2"
                       strokeDasharray={213.6}
-                      strokeDashoffset={213.6 - (rawProgress / 100) * 213.6}
+                      strokeDashoffset={213.6 - (progress.value / 100) * 213.6}
                       strokeLinecap="round"
                       className="transition-all duration-300"
                     />
@@ -186,8 +196,8 @@ export const RadarView: React.FC<RadarViewProps> = ({ peers, selectedPeers, onTo
                   </span>
                 )}
                 {hint === 'rejected' && <span className="text-[12px] font-medium text-[#FF1818]">已拒绝</span>}
-                {rawProgress !== null && hint !== 'waiting' && hint !== 'rejected' && <span className="text-[12px] text-[#0066FF] font-medium">{rawProgress}%</span>}
-                {hint === 'completed' && rawProgress === null && <span className="text-[12px] font-medium text-[#4DC43B]">已完成</span>}
+                {progress !== null && hint !== 'waiting' && hint !== 'rejected' && <span className="text-[12px] text-[#0066FF] font-medium">{progress.label}</span>}
+                {hint === 'completed' && progress === null && <span className="text-[12px] font-medium text-[#4DC43B]">已完成</span>}
               </div>
             </div>
           )

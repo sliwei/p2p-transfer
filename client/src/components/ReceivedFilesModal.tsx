@@ -1,7 +1,71 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 
 import type { ReceivedFile } from '../hooks/useWebRTC'
 import jsBridge from '../utils/js-bridge'
+import { isP2pTextReceived } from '../utils/p2p-text'
+
+/** 人类可读大小（与 SelectedFilesList 思路一致，略短） */
+function formatCompactSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes === 0) return '0 B'
+  const kb = 1024
+  const mb = kb * 1024
+  if (bytes < kb) return `${bytes} B`
+  if (bytes < mb) return `${(bytes / kb).toFixed(bytes < 10 * kb ? 1 : 0)} KB`
+  return `${(bytes / mb).toFixed(2)} MB`
+}
+
+function ReceivedTextRow({ file }: { file: ReceivedFile }) {
+  const [text, setText] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void file.blob
+      .text()
+      .then((t) => {
+        if (!cancelled) setText(t)
+      })
+      .catch(() => {
+        if (!cancelled) setText('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [file.blob, file.id])
+
+  const handleCopy = async () => {
+    try {
+      const t = text || (await file.blob.text())
+      await navigator.clipboard.writeText(t)
+      toast.success('已复制到剪贴板')
+    } catch {
+      toast.error('复制失败')
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl bg-[#F8F9FA] p-3">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#E8EEFF] text-[13px] font-semibold text-[#2266FE]">文</div>
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="rounded-md bg-[#2266FE]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#2266FE]">文字</span>
+            <span className="text-[11px] text-[#999999]">类型：纯文本 · {formatCompactSize(file.size)}</span>
+          </div>
+          <p className="max-h-[9rem] overflow-y-auto whitespace-pre-wrap break-words text-[14px] leading-snug text-[#333333]">{text || '读取中…'}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          className="shrink-0 rounded-full border border-[#2266FE] px-3 py-1.5 text-[13px] font-medium text-[#2266FE] hover:bg-[#2266FE]/5"
+        >
+          复制
+        </button>
+      </div>
+    </div>
+  )
+}
 
 function runDoneInBackground(onClose: () => void, onDone: () => void | Promise<void>) {
   if (jsBridge.isNativeEmbedHost()) {
@@ -50,15 +114,19 @@ export const ReceivedFilesModal: React.FC<ReceivedFilesModalProps> = ({ files, o
           </button>
         </div>
         <div className="p-5 overflow-y-auto flex-1 flex flex-col gap-3">
-          {files.map((file) => (
-            <div key={file.id} className="flex items-center gap-3 bg-[#F8F9FA] p-3 rounded-xl">
-              <div className="w-10 h-10 rounded-lg bg-[#E6E5F7] flex items-center justify-center text-[#333333] font-medium text-xs shrink-0">{file.name.split('.').pop()?.toUpperCase()}</div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[14px] text-[#333333] truncate">{file.name}</div>
-                <div className="text-[12px] text-[#999999]">{(file.size / 1024 / 1024).toFixed(2)} MB</div>
+          {files.map((file) =>
+            isP2pTextReceived(file) ? (
+              <ReceivedTextRow key={file.id} file={file} />
+            ) : (
+              <div key={file.id} className="flex items-center gap-3 bg-[#F8F9FA] p-3 rounded-xl">
+                <div className="w-10 h-10 rounded-lg bg-[#E6E5F7] flex items-center justify-center text-[#333333] font-medium text-xs shrink-0">{file.name.split('.').pop()?.toUpperCase()}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[14px] text-[#333333] truncate">{file.name}</div>
+                  <div className="text-[12px] text-[#999999]">{(file.size / 1024 / 1024).toFixed(2)} MB</div>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          )}
         </div>
         <div className="px-5 py-4 border-t border-[#F0F0F0]">
           {stepwise ? (
